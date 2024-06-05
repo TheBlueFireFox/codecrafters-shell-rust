@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+};
 
 fn main() {
     repl();
@@ -67,10 +70,10 @@ fn run_builtins<'name>(com: Builtins, rest: &[&'name str]) -> Result<(), Errors<
         }
         Builtins::Type => {
             let com = rest[0];
-            if let Ok(v) = is_program(com) {
-                println!("{} is {}", com, v);
-            } else if is_builtin(com).is_ok() {
+            if is_builtin(com).is_ok() {
                 println!("{} is a shell builtin", com);
+            } else if let Ok(v) = is_program(com) {
+                println!("{} is {}", com, v);
             } else {
                 println!("{} not found", com)
             }
@@ -81,6 +84,19 @@ fn run_builtins<'name>(com: Builtins, rest: &[&'name str]) -> Result<(), Errors<
 }
 
 fn is_program(com: &str) -> Result<String, Errors<'_>> {
+    let paths = std::env::var("PATH").expect("PATH should have been set correctly");
+    let mut pbuf = PathBuf::new();
+    for path in paths.split(':').map(str::trim) {
+        pbuf.clear();
+        pbuf.push(path);
+        pbuf.push(com);
+        if pbuf.is_file() {
+            return Ok(pbuf
+                .to_str()
+                .expect("unable to create string because of invalid UTF8")
+                .to_string());
+        }
+    }
     Err(Errors::CommandNotFound(com))
 }
 
@@ -91,15 +107,15 @@ fn run_program<'name>(com: &'name str, _rest: &[&'name str]) -> Result<(), Error
 fn run_commands(command: &str) -> Result<(), Errors> {
     let (com, rest) = command.split_once(' ').unwrap_or((command, ""));
     let parts: Vec<_> = rest.split_whitespace().collect();
-    // TODO: match commands
-    match run_program(com, &parts) {
-        Ok(_) => return Ok(()),
-        Err(Errors::CommandNotFound(_)) => {}
-        err @ Err(_) => return err,
+
+    if let Ok(com) = com.try_into() {
+        return run_builtins(com, &parts);
     }
-    match com.try_into() {
-        Ok(com) => run_builtins(com, &parts),
-        Err(_) => Err(Errors::CommandNotFound(com)),
+
+    match run_program(com, &parts) {
+        Ok(_) => Ok(()),
+        Err(Errors::CommandNotFound(_)) => Err(Errors::CommandNotFound(com)),
+        err @ Err(_) => err,
     }
 }
 
