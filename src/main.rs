@@ -106,6 +106,13 @@ impl State {
                 // absolute
                 let new = if new.starts_with('/') {
                     PathBuf::from_str(new).or(Err(Errors::IncorrectArgument(new)))?
+                } else if new.starts_with('~') {
+                    // home case
+                    let hm = std::env::var("HOME").expect("error getting HOME env variable");
+                    let mut hm =
+                        PathBuf::from_str(&hm).expect("HOME Environment variable is not valid");
+                    hm.push(new.trim_start_matches('~'));
+                    hm
                 } else {
                     old.push(new);
                     old
