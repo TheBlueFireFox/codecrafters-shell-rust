@@ -3,6 +3,7 @@
 use std::{
     io::{self, Write},
     path::PathBuf,
+    process::Command,
 };
 
 fn main() {
@@ -100,8 +101,24 @@ fn is_program(com: &str) -> Result<String, Errors<'_>> {
     Err(Errors::CommandNotFound(com))
 }
 
-fn run_program<'name>(com: &'name str, _rest: &[&'name str]) -> Result<(), Errors<'name>> {
-    Err(Errors::CommandNotFound(com))
+fn run_program<'name>(com: &'name str, rest: &[&'name str]) -> Result<(), Errors<'name>> {
+    match is_program(com) {
+        Err(_) => Err(Errors::CommandNotFound(com)),
+        Ok(path) => {
+            let mut child = Command::new(path)
+                .args(rest)
+                .spawn()
+                .expect("Failed to execute the child process");
+            let code = child.wait().expect("Failed to wait on child");
+            let code = code.code().unwrap_or(0);
+
+            if code == 0 {
+                Ok(())
+            } else {
+                Err(Errors::ExitCode(code))
+            }
+        }
+    }
 }
 
 fn run_commands(command: &str) -> Result<(), Errors> {
