@@ -37,6 +37,11 @@ fn builtins<'name>(com: &'name str, rest: &[&'name str]) -> Result<(), Errors<'n
             }
             Err(Errors::IncorrectArgumentType(rest[0], "integer"))
         }
+        "echo" => {
+            println!("{}", rest.join(" "));
+            io::stdout().flush().unwrap();
+            Ok(())
+        }
         _ => Err(Errors::CommandNotFound(com)),
     }
 }
