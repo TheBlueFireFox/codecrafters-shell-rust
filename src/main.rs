@@ -4,6 +4,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     process::Command,
+    str::FromStr,
 };
 
 fn main() {
@@ -22,6 +23,8 @@ enum Errors<'name> {
     MissingArgument(&'name str),
     #[error("The incorrect argument {0} should be a {1}")]
     IncorrectArgumentType(&'name str, &'name str),
+    #[error("Path is not valid {0}")]
+    IncorrectArgument(&'name str),
 }
 
 enum Builtins {
@@ -29,6 +32,7 @@ enum Builtins {
     Echo,
     Type,
     Pwd,
+    Cd,
 }
 
 impl<'input> TryFrom<&'input str> for Builtins {
@@ -40,6 +44,7 @@ impl<'input> TryFrom<&'input str> for Builtins {
             "echo" => Ok(Self::Echo),
             "type" => Ok(Self::Type),
             "pwd" => Ok(Self::Pwd),
+            "cd" => Ok(Self::Cd),
             _ => Err(Errors::CommandNotFound(value)),
         }
     }
@@ -55,7 +60,11 @@ impl State {
         com.try_into().map(|_: Builtins| ())
     }
 
-    fn run_builtins<'name>(&self, com: Builtins, rest: &[&'name str]) -> Result<(), Errors<'name>> {
+    fn run_builtins<'name>(
+        &mut self,
+        com: Builtins,
+        rest: &[&'name str],
+    ) -> Result<(), Errors<'name>> {
         match com {
             Builtins::Exit => {
                 if rest.is_empty() {
@@ -89,6 +98,26 @@ impl State {
                 let p = format!("{:?}", self.path);
                 println!("{}", p.trim_matches('"'));
                 io::stdout().flush().unwrap();
+                Ok(())
+            }
+            Builtins::Cd => {
+                let mut old = self.path.clone();
+                let new = rest[0];
+                // absolute
+                let new = if new.starts_with('/') {
+                    PathBuf::from_str(new).or(Err(Errors::IncorrectArgument(new)))?
+                } else {
+                    old.push(new);
+                    old
+                };
+
+                if new.is_dir() {
+                    self.path = std::fs::canonicalize(new).expect("Path should exists");
+                } else {
+                    let p = format!("{:?}", new);
+                    println!("cd: {}: No such file or directory", p.trim_matches('"'));
+                    io::stdout().flush().unwrap();
+                }
                 Ok(())
             }
         }
@@ -131,7 +160,7 @@ impl State {
         }
     }
 
-    fn run_commands<'com>(&self, command: &'com str) -> Result<(), Errors<'com>> {
+    fn run_commands<'com>(&mut self, command: &'com str) -> Result<(), Errors<'com>> {
         let (com, rest) = command.split_once(' ').unwrap_or((command, ""));
         let parts: Vec<_> = rest.split_whitespace().collect();
 
@@ -185,6 +214,10 @@ fn repl() {
                 io::stdout().flush().unwrap();
             }
             Err(e @ Errors::IncorrectArgumentType(_, _)) => {
+                println!("{}", e);
+                io::stdout().flush().unwrap();
+            }
+            Err(e @ Errors::IncorrectArgument(_)) => {
                 println!("{}", e);
                 io::stdout().flush().unwrap();
             }
