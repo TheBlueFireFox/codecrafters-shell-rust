@@ -2,17 +2,32 @@
 use std::io::{self, Write};
 
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    // println!("Logs from your program will appear here!");
+    repl();
+}
 
-    // Uncomment this block to pass the first stage
-    print!("$ ");
-    io::stdout().flush().unwrap();
-
-    // Wait for user input
+fn repl() {
     let stdin = io::stdin();
     let mut input = String::new();
-    stdin.read_line(&mut input).unwrap();
-    println!("{}: command not found", input.trim());
-    io::stdout().flush().unwrap();
+    loop {
+        input.clear();
+
+        // add promt
+        print!("$ ");
+        io::stdout().flush().unwrap();
+        let size = stdin.read_line(&mut input).unwrap();
+        if size == 0 {
+            break;
+        }
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        println!("{}: command not found", input.trim());
+        io::stdout().flush().unwrap();
+
+        // read input
+        // process
+        // output processed
+    }
 }
