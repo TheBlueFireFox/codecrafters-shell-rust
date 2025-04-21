@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+mod args;
 
 use std::{
     borrow::Cow,
@@ -8,10 +8,10 @@ use std::{
     str::FromStr,
 };
 
-use itertools::Itertools;
+use anyhow::Context as _;
 
-fn main() {
-    repl();
+fn main() -> anyhow::Result<()> {
+    repl()
 }
 
 type ExitCode = i32;
@@ -179,7 +179,7 @@ impl State {
 
     fn run_commands<'com>(&mut self, command: &'com str) -> Result<(), Errors<'com>> {
         let (com, rest) = command.split_once(' ').unwrap_or((command, ""));
-        let parts: Vec<_> = process_args(rest);
+        let parts: Vec<_> = args::process_args(rest);
 
         if let Ok(com) = com.try_into() {
             return self.run_builtins(com, &parts);
@@ -193,258 +193,13 @@ impl State {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Character {
-    SingleQuote,
-    DoubleQuote,
-    WhiteSpace,
-    Other,
-}
-
-impl Character {
-    fn map(c: char) -> Self {
-        match c {
-            '\'' => Self::SingleQuote,
-            '"' => Self::DoubleQuote,
-            ' ' => Self::WhiteSpace,
-            _ => Self::Other,
-        }
-    }
-}
-
-fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
-    let mut v: Vec<Cow<'_, str>> = vec![];
-
-    let mut current_block = Character::WhiteSpace;
-    let mut last_idx = 0;
-
-    let mut it = args_raw.chars().chain([' ']).tuple_windows().enumerate();
-
-    while let Some((idx, (c1, c2))) = it.next() {
-        if let ('\\', _) = (c1, c2) {
-            // we don't want to skip this one
-            if let Character::WhiteSpace = current_block {
-                current_block = Character::Other;
-                last_idx = idx;
-            }
-            it.next();
-            continue;
-        }
-        match (current_block, Character::map(c1)) {
-            (Character::SingleQuote, Character::SingleQuote) => {
-                // case 'XX' <-
-                // finished text block
-                // + 1 to ignore '
-                // ..idx to ignore '
-                if !c2.is_whitespace() {
-                    continue;
-                }
-
-                let s = &args_raw[last_idx..=idx];
-                v.push(s.into());
-                current_block = Character::WhiteSpace;
-            }
-            (Character::SingleQuote, Character::DoubleQuote) => {
-                // case: '" <-
-            }
-            (Character::SingleQuote, Character::WhiteSpace) => {
-                // case: '_ <-
-            }
-            (Character::SingleQuote, Character::Other) => {
-                // case: 'X <-
-            }
-            (Character::DoubleQuote, Character::SingleQuote) => {
-                // case: "' <-
-            }
-            (Character::DoubleQuote, Character::DoubleQuote) => {
-                // case: "XX" <-
-                // finished text block
-                // + 1 to ignore '
-                // ..idx to ignore '
-                if !c2.is_whitespace() {
-                    continue;
-                }
-                let s = &args_raw[last_idx..=idx];
-                v.push(s.into());
-                current_block = Character::WhiteSpace;
-            }
-            (Character::DoubleQuote, Character::WhiteSpace) => {}
-            (Character::DoubleQuote, Character::Other) => {}
-            (Character::WhiteSpace, Character::SingleQuote) => {
-                // case: _' <-
-                current_block = Character::SingleQuote;
-                last_idx = idx;
-            }
-            (Character::WhiteSpace, Character::DoubleQuote) => {
-                current_block = Character::DoubleQuote;
-                last_idx = idx;
-            }
-            (Character::WhiteSpace, Character::WhiteSpace) => {}
-            (Character::WhiteSpace, Character::Other) => {
-                // case: _X <-
-                // more special case
-                current_block = Character::Other;
-                last_idx = idx;
-            }
-            (Character::Other, Character::SingleQuote) => {
-                // case: X' <-
-                // b'example'a => bexamplea
-
-                // let s = &args_raw[last_idx..=idx];
-                // v.push(s);
-
-                // last_idx = idx;
-                current_block = Character::SingleQuote;
-            }
-            (Character::Other, Character::DoubleQuote) => {
-                // case: XX" <-
-
-                // let s = &args_raw[last_idx..=idx];
-                // v.push(s.into());
-
-                // last_idx = idx;
-                current_block = Character::DoubleQuote;
-            }
-            (Character::Other, Character::WhiteSpace) => {
-                let s = &args_raw[last_idx..idx];
-                v.push(s.into());
-
-                current_block = Character::WhiteSpace;
-            }
-            (Character::Other, Character::Other) => {
-                // case: XX <-
-            }
-        }
-    }
-
-    match current_block {
-        Character::SingleQuote => {
-            unimplemented!("missing end quote")
-        }
-        Character::DoubleQuote => {
-            unimplemented!("missing end double quote")
-        }
-        Character::WhiteSpace => {}
-        Character::Other => {
-            let s = &args_raw[last_idx..];
-            v.push(s.into());
-        }
-    }
-
-    for arg in v.iter_mut() {
-        // trying to process the argument in a single pass
-        let mut it = arg.chars().tuple_windows().enumerate().peekable();
-
-        let mut processing_required = None;
-
-        // check if any of these blocks need processing
-        while let Some((idx, (c1, c2))) = it.peek().copied() {
-            match (c1, c2) {
-                ('\'', _) | ('"', _) | ('\\', _) => {
-                    // a ' => needs processing
-                    // a " => needs processing
-                    // escaped symbol => needs processing
-                    processing_required = Some(idx);
-                    break;
-                }
-                _ => {
-                    // we don't care about this combination
-                }
-            }
-            // consume the token
-            it.next();
-        }
-
-        let mut s = match processing_required {
-            None => continue,
-            Some(c) => {
-                let mut s = String::with_capacity(arg.len());
-                // add the clean blocks
-                s.push_str(&arg[..c]);
-                s
-            }
-        };
-
-        let mut last_char = None;
-        let mut current_context = Character::WhiteSpace;
-
-        while let Some((_, (c1, c2))) = it.next() {
-            last_char = Some(c2);
-            match (c1, c2) {
-                ('\'', _) => {
-                    // a ' => needs processing
-                    // a " => needs processing
-                    // escaped symbol => needs processing
-                    match current_context {
-                        Character::SingleQuote => {
-                            current_context = Character::WhiteSpace;
-                        }
-                        Character::DoubleQuote => {
-                            s.push('\'');
-                        }
-                        Character::WhiteSpace => {
-                            current_context = Character::SingleQuote;
-                        }
-                        Character::Other => {
-                            unimplemented!("If I get this one I messed up");
-                        }
-                    }
-                }
-                ('"', _) => match current_context {
-                    Character::SingleQuote => {
-                        s.push('"');
-                    }
-                    Character::DoubleQuote => current_context = Character::WhiteSpace,
-                    Character::WhiteSpace => current_context = Character::DoubleQuote,
-                    Character::Other => {}
-                },
-                ('\\', '\\') => {
-                    s.push('\\');
-                    last_char = None;
-                    it.next();
-                }
-                ('\\', x) => match current_context {
-                    Character::SingleQuote | Character::DoubleQuote => {
-                        s.push('\\');
-                        s.push(x);
-                        it.next();
-                    }
-                    Character::WhiteSpace => {
-                        s.push(x);
-                        it.next();
-                    }
-                    Character::Other => {
-                        s.push(x);
-                        last_char = None;
-                        it.next();
-                    }
-                },
-                v => {
-                    // we don't care about this combination
-                    s.push(v.0);
-                }
-            }
-        }
-
-        match last_char {
-            Some('\'' | '"' | '\\') => {}
-            Some(x) => s.push(x),
-            None => {}
-        }
-
-        *arg = Cow::Owned(s);
-    }
-
-    v
-}
-
-fn repl() {
+fn repl() -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut input = String::new();
 
     let mut state = State {
         last_exit_code: 0,
-        path: std::env::current_dir().expect("Current directory is invalid?"),
+        path: std::env::current_dir().context("Current directory is invalid?")?,
     };
 
     loop {
@@ -452,8 +207,8 @@ fn repl() {
 
         // add promt
         print!("$ ");
-        io::stdout().flush().unwrap();
-        let size = stdin.read_line(&mut input).unwrap();
+        io::stdout().flush()?;
+        let size = stdin.read_line(&mut input)?;
         if size == 0 {
             println!();
             break;
@@ -466,139 +221,22 @@ fn repl() {
             Ok(_) => state.last_exit_code = 0,
             Err(Errors::CommandNotFound(_)) => {
                 println!("{}: command not found", input);
-                io::stdout().flush().unwrap();
             }
             Err(Errors::ExitCode(v)) => {
                 state.last_exit_code = v;
             }
             Err(e @ Errors::MissingArgument(_)) => {
                 println!("{}", e);
-                io::stdout().flush().unwrap();
             }
             Err(e @ Errors::IncorrectArgumentType(_, _)) => {
                 println!("{}", e);
-                io::stdout().flush().unwrap();
             }
             Err(e @ Errors::IncorrectArgument(_)) => {
                 println!("{}", e);
-                io::stdout().flush().unwrap();
             }
         }
-
-        // read input
-        // process
-        // output processed
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::borrow::Cow;
-
-    use crate::process_args;
-
-    #[test]
-    fn test_process_args_simple() {
-        let txt = "foo";
-        let exp: &[Cow<'_, str>] = &["foo"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
+        io::stdout().flush()?;
     }
 
-    #[test]
-    fn test_process_args_simple_multiple() {
-        let txt = "foo XX";
-        let exp: &[Cow<'_, str>] = &["foo", "XX"].map(Into::into);
-
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_single_single_quote() {
-        let txt = "'XX'";
-        let exp: &[Cow<'_, str>] = &["XX"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_multiple_single_quote() {
-        let txt = "'AA    ''BB' 'CC'";
-        let exp: &[Cow<'_, str>] = &["AA    BB", "CC"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_single_quote_with_double() {
-        let txt = "'\"AA\"'";
-        let exp: &[Cow<'_, str>] = &["\"AA\""].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_double_quote() {
-        let txt = "\"XX\"";
-        let exp: &[Cow<'_, str>] = &["XX"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_multiple_double_quote() {
-        let txt = "\"AA\"\"BB\" \"CC\"";
-        let exp: &[Cow<'_, str>] = &["AABB", "CC"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_double_quote_with_single() {
-        let txt = "\"'AA'\"";
-        let exp: &[Cow<'_, str>] = &["'AA'"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_double_backslash() {
-        let txt = "/tmp/file\\\\name";
-        let exp: &[Cow<'_, str>] = &["/tmp/file\\name"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_escaped_string_backslash() {
-        let txt = "world\\ \\ \\ \\ \\ \\ script";
-        let exp: &[Cow<'_, str>] = &["world      script"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_escaped_string_backslash_beginning() {
-        let txt = "\\ world";
-        let exp: &[Cow<'_, str>] = &[" world"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_false_escaped_backslasch() {
-        let txt = "\"before\\   after\"";
-        let exp: &[Cow<'_, str>] = &["before\\   after"].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
-
-    #[test]
-    fn test_process_args_escaped_before_text() {
-        let txt = r#"\'\"world hello\"\'"#;
-        let exp: &[Cow<'_, str>] = &[r#"'"world"#, r#"hello"'"#].map(Into::into);
-        let v = process_args(txt);
-        assert_eq!(exp, &v[..]);
-    }
+    Ok(())
 }
