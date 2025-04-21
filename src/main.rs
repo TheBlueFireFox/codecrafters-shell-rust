@@ -116,7 +116,7 @@ impl Redirect {
 
                     return Ok((s, Some(i)));
                 }
-                "1>>" => {
+                "1>>" | ">>" => {
                     let stdout = File::options()
                         .create(true)
                         .append(true)
