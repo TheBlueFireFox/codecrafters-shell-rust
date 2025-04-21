@@ -28,6 +28,8 @@ enum Errors<'name> {
     IncorrectArgumentType(Cow<'name, str>, Cow<'name, str>),
     #[error("Path is not valid {0}")]
     IncorrectArgument(Cow<'name, str>),
+    #[error("Io Error {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 enum Builtins {
@@ -78,15 +80,14 @@ impl State {
                 if let Ok(c) = code {
                     std::process::exit(c);
                 }
-                Err(Errors::IncorrectArgumentType(
+
+                return Err(Errors::IncorrectArgumentType(
                     rest[0].clone(),
                     "integer".into(),
-                ))
+                ));
             }
             Builtins::Echo => {
                 println!("{}", rest.join(" "));
-                io::stdout().flush().unwrap();
-                Ok(())
             }
             Builtins::Type => {
                 let com = rest[0].clone();
@@ -97,14 +98,10 @@ impl State {
                 } else {
                     println!("{} not found", com)
                 }
-                io::stdout().flush().unwrap();
-                Ok(())
             }
             Builtins::Pwd => {
                 let p = format!("{:?}", self.path);
                 println!("{}", p.trim_matches('"'));
-                io::stdout().flush().unwrap();
-                Ok(())
             }
             Builtins::Cd => {
                 let mut old = self.path.clone();
@@ -125,15 +122,14 @@ impl State {
                 };
 
                 if new.is_dir() {
-                    self.path = std::fs::canonicalize(new).expect("Path should exists");
+                    self.path = std::fs::canonicalize(new)?;
                 } else {
                     let p = format!("{:?}", new);
                     println!("cd: {}: No such file or directory", p.trim_matches('"'));
-                    io::stdout().flush().unwrap();
                 }
-                Ok(())
             }
         }
+        Ok(())
     }
 
     fn is_program(com: &str) -> Result<String, Errors<'_>> {
@@ -208,6 +204,7 @@ fn repl() -> anyhow::Result<()> {
         // add promt
         print!("$ ");
         io::stdout().flush()?;
+
         let size = stdin.read_line(&mut input)?;
         if size == 0 {
             println!();
@@ -234,8 +231,10 @@ fn repl() -> anyhow::Result<()> {
             Err(e @ Errors::IncorrectArgument(_)) => {
                 println!("{}", e);
             }
+            Err(e @ Errors::IoError(_)) => {
+                println!("{}", e);
+            }
         }
-        io::stdout().flush()?;
     }
 
     Ok(())

@@ -214,11 +214,22 @@ pub fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
                     it.next();
                 }
                 ('\\', x) => match current_context {
-                    Character::SingleQuote | Character::DoubleQuote => {
+                    Character::SingleQuote => {
                         s.push('\\');
                         s.push(x);
                         it.next();
                     }
+                    Character::DoubleQuote => match x {
+                        '"' => {
+                            s.push('"');
+                            it.next();
+                        }
+                        _ => {
+                            s.push('\\');
+                            s.push(x);
+                            it.next();
+                        }
+                    },
                     Character::WhiteSpace => {
                         s.push(x);
                         it.next();
