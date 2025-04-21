@@ -93,7 +93,7 @@ impl State {
                 let com = rest[0].clone();
                 if Self::is_builtin(com.as_ref()).is_ok() {
                     println!("{} is a shell builtin", com);
-                } else if let Ok(v) = Self::is_program(com.as_ref()) {
+                } else if let Ok(v) = Self::is_program(&com) {
                     println!("{} is {}", com, v);
                 } else {
                     println!("{} not found", com)
@@ -132,13 +132,13 @@ impl State {
         Ok(())
     }
 
-    fn is_program(com: &str) -> Result<String, Errors<'_>> {
+    fn is_program<'a>(com: &Cow<'a, str>) -> Result<String, Errors<'a>> {
         let paths = std::env::var("PATH").expect("PATH should have been set correctly");
         let mut pbuf = PathBuf::new();
         for path in paths.split(':').map(str::trim) {
             pbuf.clear();
             pbuf.push(path);
-            pbuf.push(com);
+            pbuf.push(com.as_ref());
             if pbuf.is_file() {
                 return Ok(pbuf
                     .to_str()
@@ -146,19 +146,19 @@ impl State {
                     .to_string());
             }
         }
-        Err(Errors::CommandNotFound(com.into()))
+        Err(Errors::CommandNotFound(com.clone()))
     }
 
     fn run_program<'com>(
         &self,
-        com: &'com str,
+        com: &Cow<'com, str>,
         rest: &[Cow<'com, str>],
     ) -> Result<(), Errors<'com>> {
         let _path = Self::is_program(com)?;
 
         // ugly alloc
         let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
-        let mut child = Command::new(com)
+        let mut child = Command::new(com.as_ref())
             .args(args)
             .spawn()
             .expect("Failed to execute the child process");
@@ -174,16 +174,16 @@ impl State {
     }
 
     fn run_commands<'com>(&mut self, command: &'com str) -> Result<(), Errors<'com>> {
-        let (com, rest) = command.split_once(' ').unwrap_or((command, ""));
-        let parts: Vec<_> = args::process_args(rest);
 
-        if let Ok(com) = com.try_into() {
-            return self.run_builtins(com, &parts);
+        let args= args::process_args(command);
+
+        if let Ok(com) = args[0].as_ref().try_into() {
+            return self.run_builtins(com, &args[1..]);
         }
 
-        match self.run_program(com, &parts) {
+        match self.run_program(&args[0], &args[1..]) {
             Ok(_) => Ok(()),
-            Err(Errors::CommandNotFound(_)) => Err(Errors::CommandNotFound(com.into())),
+            Err(Errors::CommandNotFound(_)) => Err(Errors::CommandNotFound(args[0].clone())),
             err @ Err(_) => err,
         }
     }

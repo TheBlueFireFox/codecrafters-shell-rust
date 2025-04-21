@@ -405,4 +405,15 @@ mod test {
             assert_str_eq!(exp.as_ref(), got.as_ref());
         }
     }
+
+    #[test]
+    fn simple_constalation() {
+        let txt = r#"'exe  with  space'"#;
+
+        let exp: &[Cow<'_, str>] = &[r#"exe  with  space"#].map(Into::into);
+        let v = process_args(txt);
+        for (exp, got) in exp.iter().zip(v) {
+            assert_str_eq!(exp.as_ref(), got.as_ref());
+        }
+    }
 }
