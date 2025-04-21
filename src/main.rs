@@ -221,21 +221,14 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
     let mut it = args_raw.chars().chain([' ']).tuple_windows().enumerate();
 
     while let Some((idx, (c1, c2))) = it.next() {
-        match (c1, c2) {
-            ('\\', '\\') => {
-                it.next();
-                it.next();
-                continue;
+        if let ('\\', _) = (c1, c2) {
+            // we don't want to skip this one
+            if let Character::WhiteSpace = current_block {
+                current_block = Character::Other;
+                last_idx = idx;
             }
-            ('\\', '\"') => {
-                it.next();
-                it.next();
-                continue;
-            }
-            ('\\', x) => {
-                unimplemented!("not supported escape \\{x}");
-            }
-            _ => {}
+            it.next();
+            continue;
         }
         match (current_block, Character::map(c1)) {
             (Character::SingleQuote, Character::SingleQuote) => {
@@ -244,7 +237,6 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
                 // + 1 to ignore '
                 // ..idx to ignore '
                 if !c2.is_whitespace() {
-                    it.next();
                     continue;
                 }
 
@@ -270,7 +262,6 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
                 // + 1 to ignore '
                 // ..idx to ignore '
                 if !c2.is_whitespace() {
-                    it.next();
                     continue;
                 }
                 let s = &args_raw[last_idx..=idx];
@@ -291,6 +282,7 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
             (Character::WhiteSpace, Character::WhiteSpace) => {}
             (Character::WhiteSpace, Character::Other) => {
                 // case: _X <-
+                // more special case
                 current_block = Character::Other;
                 last_idx = idx;
             }
@@ -373,11 +365,11 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
             }
         };
 
-        let mut last_char = ' ';
+        let mut last_char = None;
         let mut current_context = Character::WhiteSpace;
 
         while let Some((_, (c1, c2))) = it.next() {
-            last_char = c2;
+            last_char = Some(c2);
             match (c1, c2) {
                 ('\'', _) => {
                     // a ' => needs processing
@@ -408,17 +400,25 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
                 },
                 ('\\', '\\') => {
                     s.push('\\');
-                    it.next();
-                    it.next();
-                }
-                ('\\', '\"') => {
-                    s.push('\"');
-                    it.next();
+                    last_char = None;
                     it.next();
                 }
-                ('\\', x) => {
-                    unimplemented!("not supported escape \\{x}");
-                }
+                ('\\', x) => match current_context {
+                    Character::SingleQuote | Character::DoubleQuote => {
+                        s.push('\\');
+                        s.push(x);
+                        it.next();
+                    }
+                    Character::WhiteSpace => {
+                        s.push(x);
+                        it.next();
+                    }
+                    Character::Other => {
+                        s.push(x);
+                        last_char = None;
+                        it.next();
+                    }
+                },
                 v => {
                     // we don't care about this combination
                     s.push(v.0);
@@ -426,8 +426,10 @@ fn process_args(args_raw: &str) -> Vec<Cow<'_, str>> {
             }
         }
 
-        if !matches!(last_char, '\'' | '"' | '\\') {
-            s.push(last_char);
+        match last_char {
+            Some('\'' | '"' | '\\') => {}
+            Some(x) => s.push(x),
+            None => {}
         }
 
         *arg = Cow::Owned(s);
@@ -556,6 +558,46 @@ mod test {
     fn test_process_args_double_quote_with_single() {
         let txt = "\"'AA'\"";
         let exp: &[Cow<'_, str>] = &["'AA'"].map(Into::into);
+        let v = process_args(txt);
+        assert_eq!(exp, &v[..]);
+    }
+
+    #[test]
+    fn test_process_args_double_backslash() {
+        let txt = "/tmp/file\\\\name";
+        let exp: &[Cow<'_, str>] = &["/tmp/file\\name"].map(Into::into);
+        let v = process_args(txt);
+        assert_eq!(exp, &v[..]);
+    }
+
+    #[test]
+    fn test_process_args_escaped_string_backslash() {
+        let txt = "world\\ \\ \\ \\ \\ \\ script";
+        let exp: &[Cow<'_, str>] = &["world      script"].map(Into::into);
+        let v = process_args(txt);
+        assert_eq!(exp, &v[..]);
+    }
+
+    #[test]
+    fn test_process_args_escaped_string_backslash_beginning() {
+        let txt = "\\ world";
+        let exp: &[Cow<'_, str>] = &[" world"].map(Into::into);
+        let v = process_args(txt);
+        assert_eq!(exp, &v[..]);
+    }
+
+    #[test]
+    fn test_process_args_false_escaped_backslasch() {
+        let txt = "\"before\\   after\"";
+        let exp: &[Cow<'_, str>] = &["before\\   after"].map(Into::into);
+        let v = process_args(txt);
+        assert_eq!(exp, &v[..]);
+    }
+
+    #[test]
+    fn test_process_args_escaped_before_text() {
+        let txt = r#"\'\"world hello\"\'"#;
+        let exp: &[Cow<'_, str>] = &[r#"'"world"#, r#"hello"'"#].map(Into::into);
         let v = process_args(txt);
         assert_eq!(exp, &v[..]);
     }
