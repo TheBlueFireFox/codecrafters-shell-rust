@@ -158,6 +158,7 @@ impl Redirect {
     }
 }
 
+#[derive(Debug, Clone)]
 enum Builtins {
     Exit,
     Echo,
@@ -178,6 +179,12 @@ impl<'input> TryFrom<&'input str> for Builtins {
             "cd" => Ok(Self::Cd),
             _ => Err(Errors::CommandNotFound(value.into())),
         }
+    }
+}
+
+impl Builtins {
+    fn supported() -> [&'static str; 5] {
+        ["exit", "echo", "type", "pwd", "cd"]
     }
 }
 
@@ -332,6 +339,79 @@ impl State {
     }
 }
 
+type Completion = trie_rs::Trie<u8>;
+
+// fn generate_program_names() -> impl Iterator<Item = String> {
+//     todo!()
+// }
+
+fn generate_completion() -> std::io::Result<Completion> {
+    let mut builder = trie_rs::TrieBuilder::new();
+
+    // add builtins
+    for s in Builtins::supported() {
+        builder.push(s);
+    }
+
+    // TODO: add program names from PATH
+
+    Ok(builder.build())
+}
+
+fn handle_tab(
+    stdout: &mut Stdout,
+    line: &mut String,
+    completion: &Completion,
+    count_tab: usize,
+) -> std::io::Result<()> {
+    let matches: Vec<String> = completion.predictive_search(line.as_bytes()).collect();
+
+    if matches.is_empty() {
+        // ring the bell
+        stdout.execute(style::Print(BELL))?;
+        return Ok(());
+    }
+
+    if matches.len() == 1 {
+        // we found a match
+        line.clear();
+        line.push_str(&matches[0]);
+        line.push(' ');
+
+        stdout
+            .queue(cursor::MoveToColumn(PROMT.len() as _))?
+            .queue(style::Print(&line))?;
+
+        stdout.flush()?;
+    }
+
+    if count_tab == 1 {
+        // ring the bell
+        stdout.execute(style::Print(BELL))?;
+        return Ok(());
+    }
+
+    stdout.queue(style::Print(NEWLINE_RAW_TERM))?;
+    for option in matches {
+        stdout
+            .queue(style::Print(&option))?
+            .queue(style::Print("  "))?;
+    }
+    stdout
+        .queue(style::Print(NEWLINE_RAW_TERM))?
+        .queue(style::Print(PROMT))?
+        .queue(style::Print(line))?;
+
+    stdout.flush()?;
+
+    // no completion found
+    Ok(())
+}
+
+const PROMT: &str = "$ ";
+const BELL: char = '\u{07}';
+const NEWLINE_RAW_TERM: &str = "\r\n";
+
 #[derive(Debug, thiserror::Error)]
 enum ReadLineError {
     #[error("Programshutdown")]
@@ -340,10 +420,10 @@ enum ReadLineError {
     Io(#[from] std::io::Error),
 }
 
-const PROMT: &str = "$ ";
-const NEWLINE_RAW_TERM: &str = "\r\n";
-
 fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
+    // load short hand
+    let completion = generate_completion()?;
+    let mut count_tab = 0;
     loop {
         match event::read()? {
             Event::Paste(s) => {
@@ -388,6 +468,15 @@ fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLine
                 }
             }
             Event::Key(KeyEvent { code, .. }) => match code {
+                KeyCode::Tab => {
+                    count_tab += 1;
+
+                    handle_tab(stdout, line, &completion, count_tab)?;
+
+                    if count_tab == 2 {
+                        count_tab = 0;
+                    }
+                }
                 KeyCode::Enter => {
                     stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
                     break;
