@@ -10,10 +10,10 @@ use std::{
 use anyhow::Context as _;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     style,
     terminal::{self, disable_raw_mode, enable_raw_mode},
-    ExecutableCommand,
+    ExecutableCommand, QueueableCommand,
 };
 use itertools::Itertools;
 
@@ -341,47 +341,55 @@ enum ReadLineError {
 }
 
 const PROMT: &str = "$ ";
+const NEWLINE_RAW_TERM: &str = "\r\n";
 
-fn read_line(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
+fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
     loop {
         match event::read()? {
+            Event::Paste(s) => {
+                line.push_str(&s);
+            }
             Event::Key(KeyEvent {
                 code,
                 modifiers: KeyModifiers::CONTROL,
-                kind: KeyEventKind::Press,
                 ..
             }) => {
                 match code {
-                    KeyCode::Char('l') | KeyCode::Char('L') => {
+                    KeyCode::Char('l' | 'L') => {
                         stdout
-                            .execute(terminal::Clear(terminal::ClearType::All))?
-                            .execute(cursor::MoveTo(0, 0))?
-                            .execute(style::Print(PROMT))?
-                            .execute(style::Print(&line))?;
+                            .queue(terminal::Clear(terminal::ClearType::All))?
+                            .queue(cursor::MoveTo(0, 0))?
+                            .queue(style::Print(PROMT))?
+                            .queue(style::Print(&line))?;
+
+                        stdout.flush()?;
                     }
-                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                    KeyCode::Char('d' | 'D') => {
                         // kill program
-                        stdout.execute(style::Print("\r\n"))?;
+                        stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
 
                         return Err(ReadLineError::Shutdown(0));
                     }
-                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                    KeyCode::Char('j' | 'J') => {
+                        stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+                        break;
+                    }
+                    KeyCode::Char('c' | 'C') => {
                         // new line
                         line.clear();
+
                         stdout
-                            .execute(cursor::MoveToNextLine(1))?
-                            .execute(style::Print(PROMT))?;
+                            .queue(style::Print(NEWLINE_RAW_TERM))?
+                            .queue(style::Print(PROMT))?;
+
+                        stdout.flush()?;
                     }
                     _ => {}
                 }
             }
-            Event::Key(KeyEvent {
-                code,
-                kind: KeyEventKind::Press,
-                ..
-            }) => match code {
+            Event::Key(KeyEvent { code, .. }) => match code {
                 KeyCode::Enter => {
-                    stdout.execute(cursor::MoveToNextLine(1))?;
+                    stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
                     break;
                 }
                 KeyCode::Backspace => {
@@ -389,16 +397,22 @@ fn read_line(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError
                         continue;
                     }
                     stdout
-                        .execute(cursor::SavePosition)?
-                        .execute(cursor::MoveToColumn(PROMT.len() as _))?
-                        .execute(terminal::Clear(terminal::ClearType::UntilNewLine))?
-                        .execute(style::Print(&line))?
-                        .execute(cursor::RestorePosition)?
-                        .execute(cursor::MoveLeft(1))?;
+                        .queue(cursor::SavePosition)?
+                        .queue(cursor::MoveToColumn(PROMT.len() as _))?
+                        .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
+                        .queue(style::Print(&line))?
+                        .queue(cursor::RestorePosition)?
+                        .queue(cursor::MoveLeft(1))?;
+
+                    stdout.flush()?;
+                }
+                KeyCode::Char('\r' | '\n') => {
+                    stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+                    break;
                 }
                 KeyCode::Char(c) => {
-                    write!(stdout, "{c}")?;
-                    stdout.flush()?;
+                    stdout.execute(style::Print(c))?;
+
                     line.push(c);
                 }
                 _ => {}
@@ -410,13 +424,18 @@ fn read_line(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError
     Ok(())
 }
 
-pub fn repl() -> anyhow::Result<Option<ExitCode>> {
+fn read_line(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
     enable_raw_mode()?;
+    let res = read_line_loop(line, stdout);
+    disable_raw_mode()?;
+    res
+}
 
+pub fn repl() -> anyhow::Result<Option<ExitCode>> {
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
 
-    let mut input = String::new();
+    let mut input = String::with_capacity(1024);
 
     let mut state = State {
         last_exit_code: 0,
@@ -426,7 +445,6 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
     let mut shutdown_code = None;
 
     loop {
-        stdout.execute(cursor::MoveToColumn(0))?;
         input.clear();
 
         // add promt
@@ -434,11 +452,8 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
         stdout.flush()?;
         stderr.flush()?;
-        let res = read_line(&mut input, &mut stdout);
 
-        disable_raw_mode()?;
-
-        match res {
+        match read_line(&mut input, &mut stdout) {
             Ok(_) => {}
             Err(ReadLineError::Shutdown(0)) => {
                 break;
@@ -448,7 +463,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
                 break;
             }
             Err(err) => {
-                writeln!(&stdout, "{:?}", err)?;
+                writeln!(&stdout, "Error: {:?}", err)?;
                 shutdown_code = Some(1);
                 break;
             }
@@ -484,14 +499,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
                 writeln!(&stdout, "{}", e)?;
             }
         }
-
-        stdout.flush()?;
-        stderr.flush()?;
-
-        enable_raw_mode()?;
     }
-
-    disable_raw_mode()?;
 
     Ok(shutdown_code)
 }

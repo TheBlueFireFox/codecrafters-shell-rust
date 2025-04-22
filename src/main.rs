@@ -11,7 +11,7 @@ fn term() -> anyhow::Result<i32> {
         }
         Ok(None) => {}
         Err(err) => {
-            println!("Error: {:?}\r", err);
+            println!("Error: {:?}", err);
         }
     }
 
