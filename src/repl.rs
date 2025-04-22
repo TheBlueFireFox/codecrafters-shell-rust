@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    ffi::OsStr,
     fs::File,
     io::{Stderr, Stdout, Write},
     path::PathBuf,
@@ -341,11 +342,42 @@ impl State {
 
 type Completion = trie_rs::Trie<u8>;
 
-// fn generate_program_names() -> impl Iterator<Item = String> {
-//     todo!()
-// }
+#[derive(Debug, thiserror::Error)]
+enum TabHandlingError {
+    #[error("PATH env is not set")]
+    MissingPathEnv,
+    #[error("File in PATH has not existing path name <{0}>")]
+    FileNameMissing(PathBuf),
+    #[error("Io Error <{0}>")]
+    Io(#[from] std::io::Error),
+}
 
-fn generate_completion() -> std::io::Result<Completion> {
+fn generate_program_names() -> Result<Vec<String>, TabHandlingError> {
+    let mut v = vec![];
+    let paths = std::env::var("PATH").map_err(|_| TabHandlingError::MissingPathEnv)?;
+
+    let process_file = |file: PathBuf| {
+        file.file_name()
+            .and_then(OsStr::to_str)
+            .map(str::to_owned)
+            .ok_or(TabHandlingError::FileNameMissing(file))
+    };
+
+    for path in std::env::split_paths(&paths).filter(|e| e.exists()) {
+        for file in std::fs::read_dir(path)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|e| e.is_file())
+        {
+            let name = process_file(file)?;
+            v.push(name);
+        }
+    }
+
+    Ok(v)
+}
+
+fn generate_completion() -> Result<Completion, TabHandlingError> {
     let mut builder = trie_rs::TrieBuilder::new();
 
     // add builtins
@@ -353,7 +385,11 @@ fn generate_completion() -> std::io::Result<Completion> {
         builder.push(s);
     }
 
-    // TODO: add program names from PATH
+    // program names
+    let exes = generate_program_names()?;
+    for s in exes {
+        builder.push(s);
+    }
 
     Ok(builder.build())
 }
@@ -418,6 +454,8 @@ enum ReadLineError {
     Shutdown(i32),
     #[error("IO ERROR <{0}>")]
     Io(#[from] std::io::Error),
+    #[error("While handling the tab completion <{0}>")]
+    TabHandling(#[from] TabHandlingError),
 }
 
 fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
