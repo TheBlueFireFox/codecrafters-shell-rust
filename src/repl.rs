@@ -486,6 +486,84 @@ enum ReadLineError {
     TabHandling(#[from] TabHandlingError),
 }
 
+fn process_controll_key(
+    code: KeyCode,
+    line: &mut String,
+    stdout: &mut Stdout,
+) -> Result<bool, ReadLineError> {
+    match code {
+        KeyCode::Char('l' | 'L') => {
+            stdout
+                .queue(terminal::Clear(terminal::ClearType::All))?
+                .queue(cursor::MoveTo(0, 0))?
+                .queue(style::Print(PROMT))?
+                .queue(style::Print(&line))?;
+
+            stdout.flush()?;
+        }
+        KeyCode::Char('d' | 'D') => {
+            // kill program
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+
+            return Err(ReadLineError::Shutdown(0));
+        }
+        KeyCode::Char('j' | 'J') => {
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            return Ok(false);
+        }
+        KeyCode::Char('c' | 'C') => {
+            // new line
+            line.clear();
+
+            stdout
+                .queue(style::Print(NEWLINE_RAW_TERM))?
+                .queue(style::Print(PROMT))?;
+
+            stdout.flush()?;
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+fn process_key_event(
+    code: KeyCode,
+    line: &mut String,
+    stdout: &mut Stdout,
+) -> Result<bool, ReadLineError> {
+    match code {
+        KeyCode::Enter => {
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            return Ok(false);
+        }
+        KeyCode::Backspace => {
+            if line.pop().is_none() {
+                return Ok(true);
+            }
+            stdout
+                .queue(cursor::SavePosition)?
+                .queue(cursor::MoveToColumn(PROMT.len() as _))?
+                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
+                .queue(style::Print(&line))?
+                .queue(cursor::RestorePosition)?
+                .queue(cursor::MoveLeft(1))?;
+
+            stdout.flush()?;
+        }
+        KeyCode::Char('\r' | '\n') => {
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            return Ok(false);
+        }
+        KeyCode::Char(c) => {
+            stdout.execute(style::Print(c))?;
+
+            line.push(c);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
 fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
     // load short hand
     let completion = generate_completion()?;
@@ -500,72 +578,20 @@ fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLine
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => {
-                match code {
-                    KeyCode::Char('l' | 'L') => {
-                        stdout
-                            .queue(terminal::Clear(terminal::ClearType::All))?
-                            .queue(cursor::MoveTo(0, 0))?
-                            .queue(style::Print(PROMT))?
-                            .queue(style::Print(&line))?;
-
-                        stdout.flush()?;
-                    }
-                    KeyCode::Char('d' | 'D') => {
-                        // kill program
-                        stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-
-                        return Err(ReadLineError::Shutdown(0));
-                    }
-                    KeyCode::Char('j' | 'J') => {
-                        stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-                        break;
-                    }
-                    KeyCode::Char('c' | 'C') => {
-                        // new line
-                        line.clear();
-
-                        stdout
-                            .queue(style::Print(NEWLINE_RAW_TERM))?
-                            .queue(style::Print(PROMT))?;
-
-                        stdout.flush()?;
-                    }
-                    _ => {}
+                if !process_controll_key(code, line, stdout)? {
+                    break;
                 }
             }
-            Event::Key(KeyEvent { code, .. }) => match code {
-                KeyCode::Tab => {
-                    tab_state = handle_tab(stdout, line, &completion, tab_state)?;
-                }
-                KeyCode::Enter => {
-                    stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            Event::Key(KeyEvent {
+                code: KeyCode::Tab, ..
+            }) => {
+                tab_state = handle_tab(stdout, line, &completion, tab_state)?;
+            }
+            Event::Key(KeyEvent { code, .. }) => {
+                if !process_key_event(code, line, stdout)? {
                     break;
                 }
-                KeyCode::Backspace => {
-                    if line.pop().is_none() {
-                        continue;
-                    }
-                    stdout
-                        .queue(cursor::SavePosition)?
-                        .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                        .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
-                        .queue(style::Print(&line))?
-                        .queue(cursor::RestorePosition)?
-                        .queue(cursor::MoveLeft(1))?;
-
-                    stdout.flush()?;
-                }
-                KeyCode::Char('\r' | '\n') => {
-                    stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-                    break;
-                }
-                KeyCode::Char(c) => {
-                    stdout.execute(style::Print(c))?;
-
-                    line.push(c);
-                }
-                _ => {}
-            },
+            }
             _ => (),
         }
     }
