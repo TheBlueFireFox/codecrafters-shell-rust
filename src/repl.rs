@@ -166,6 +166,7 @@ enum Builtins {
     Type,
     Pwd,
     Cd,
+    History,
 }
 
 impl<'input> TryFrom<&'input str> for Builtins {
@@ -178,20 +179,22 @@ impl<'input> TryFrom<&'input str> for Builtins {
             "type" => Ok(Self::Type),
             "pwd" => Ok(Self::Pwd),
             "cd" => Ok(Self::Cd),
+            "history" => Ok(Self::History),
             _ => Err(Errors::CommandNotFound(value.into())),
         }
     }
 }
 
 impl Builtins {
-    fn supported() -> [&'static str; 5] {
-        ["exit", "echo", "type", "pwd", "cd"]
+    fn supported() -> [&'static str; 6] {
+        ["exit", "echo", "type", "pwd", "cd", "history"]
     }
 }
 
 struct State {
     last_exit_code: ExitCode,
     path: PathBuf,
+    history: Vec<String>,
 }
 
 impl State {
@@ -207,69 +210,102 @@ impl State {
         _stderr: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
         match com {
-            Builtins::Exit => {
-                if rest.is_empty() {
-                    return Err(Errors::MissingArgument("exit".into()));
-                }
+            Builtins::Exit => self.run_exit(rest),
+            Builtins::Echo => self.run_echo(rest, stdout),
+            Builtins::Type => self.run_type(rest, stdout),
+            Builtins::History => self.run_history(rest, stdout),
+            Builtins::Pwd => self.run_pwd(stdout),
+            Builtins::Cd => self.run_cd(rest, stdout),
+        }
+    }
 
-                let code = rest[0].parse();
-                if let Ok(c) = code {
-                    return Err(Errors::Shutdown(c));
-                }
+    fn run_cd<'name>(
+        &mut self,
+        rest: &[Cow<'name, str>],
+        stdout: &mut dyn std::io::Write,
+    ) -> Result<(), Errors<'name>> {
+        let mut old = self.path.clone();
+        let new = rest[0].clone();
+        // absolute
+        let new = if new.starts_with('/') {
+            PathBuf::from_str(new.as_ref()).or(Err(Errors::IncorrectArgument(new)))?
+        } else if new.starts_with('~') {
+            // home case
+            let hm = std::env::var("HOME").expect("error getting HOME env variable");
+            let mut hm = PathBuf::from_str(&hm).expect("HOME Environment variable is not valid");
+            hm.push(new.trim_start_matches('~'));
+            hm
+        } else {
+            old.push(new.as_ref());
+            old
+        };
 
-                return Err(Errors::IncorrectArgumentType(
-                    rest[0].clone(),
-                    "integer".into(),
-                ));
-            }
-            Builtins::Echo => {
-                writeln!(stdout, "{}", rest.join(" "))?;
-            }
-            Builtins::Type => {
-                let com = rest[0].clone();
-                if Self::is_builtin(com.as_ref()).is_ok() {
-                    writeln!(stdout, "{} is a shell builtin", com)?;
-                } else if let Ok(v) = Self::is_program(&com) {
-                    writeln!(stdout, "{} is {}", com, v)?;
-                } else {
-                    writeln!(stdout, "{} not found", com)?;
-                }
-            }
-            Builtins::Pwd => {
-                let p = format!("{:?}", self.path);
-                writeln!(stdout, "{}", p.trim_matches('"'))?;
-            }
-            Builtins::Cd => {
-                let mut old = self.path.clone();
-                let new = rest[0].clone();
-                // absolute
-                let new = if new.starts_with('/') {
-                    PathBuf::from_str(new.as_ref()).or(Err(Errors::IncorrectArgument(new)))?
-                } else if new.starts_with('~') {
-                    // home case
-                    let hm = std::env::var("HOME").expect("error getting HOME env variable");
-                    let mut hm =
-                        PathBuf::from_str(&hm).expect("HOME Environment variable is not valid");
-                    hm.push(new.trim_start_matches('~'));
-                    hm
-                } else {
-                    old.push(new.as_ref());
-                    old
-                };
-
-                if new.is_dir() {
-                    self.path = std::fs::canonicalize(new)?;
-                } else {
-                    let p = format!("{:?}", new);
-                    writeln!(
-                        stdout,
-                        "cd: {}: No such file or directory",
-                        p.trim_matches('"')
-                    )?;
-                }
-            }
+        if new.is_dir() {
+            self.path = std::fs::canonicalize(new)?;
+        } else {
+            let p = format!("{:?}", new);
+            writeln!(
+                stdout,
+                "cd: {}: No such file or directory",
+                p.trim_matches('"')
+            )?;
         }
         Ok(())
+    }
+
+    fn run_pwd<'name>(&mut self, stdout: &mut dyn std::io::Write) -> Result<(), Errors<'name>> {
+        let p = format!("{:?}", self.path);
+        writeln!(stdout, "{}", p.trim_matches('"'))?;
+        Ok(())
+    }
+
+    fn run_history<'name>(
+        &mut self,
+        _rest: &[Cow<'name, str>],
+        _stdout: &mut dyn std::io::Write,
+    ) -> Result<(), Errors<'name>> {
+        todo!()
+    }
+
+    fn run_type<'name>(
+        &mut self,
+        rest: &[Cow<'name, str>],
+        stdout: &mut dyn std::io::Write,
+    ) -> Result<(), Errors<'name>> {
+        let com = rest[0].clone();
+        if Self::is_builtin(com.as_ref()).is_ok() {
+            writeln!(stdout, "{} is a shell builtin", com)?;
+        } else if let Ok(v) = Self::is_program(&com) {
+            writeln!(stdout, "{} is {}", com, v)?;
+        } else {
+            writeln!(stdout, "{} not found", com)?;
+        }
+        Ok(())
+    }
+
+    fn run_echo<'name>(
+        &mut self,
+        rest: &[Cow<'name, str>],
+        stdout: &mut dyn std::io::Write,
+    ) -> Result<(), Errors<'name>> {
+        writeln!(stdout, "{}", rest.join(" "))?;
+        Ok(())
+    }
+
+    fn run_exit<'name>(&mut self, rest: &[Cow<'name, str>]) -> Result<(), Errors<'name>> {
+        if rest.is_empty() {
+            return Err(Errors::MissingArgument("exit".into()));
+        }
+
+        let code = rest[0].parse();
+        if let Ok(c) = code {
+            return Err(Errors::Shutdown(c));
+        }
+
+        Err(Errors::IncorrectArgumentType(
+            rest[0].clone(),
+            "integer".into(),
+        ))
     }
 
     fn is_program<'a>(com: &Cow<'a, str>) -> Result<String, Errors<'a>> {
@@ -486,7 +522,11 @@ enum ReadLineError {
     TabHandling(#[from] TabHandlingError),
 }
 
-fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
+fn read_line_loop(
+    line: &mut String,
+    stdout: &mut Stdout,
+    _history: &[String],
+) -> Result<(), ReadLineError> {
     // load short hand
     let completion = generate_completion()?;
     let mut tab_state = TabCompletionState::None;
@@ -573,9 +613,13 @@ fn read_line_loop(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLine
     Ok(())
 }
 
-fn read_line(line: &mut String, stdout: &mut Stdout) -> Result<(), ReadLineError> {
+fn read_line(
+    line: &mut String,
+    stdout: &mut Stdout,
+    history: &[String],
+) -> Result<(), ReadLineError> {
     enable_raw_mode()?;
-    let res = read_line_loop(line, stdout);
+    let res = read_line_loop(line, stdout, history);
     disable_raw_mode()?;
     res
 }
@@ -589,6 +633,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
     let mut state = State {
         last_exit_code: 0,
         path: std::env::current_dir().context("Current directory is invalid?")?,
+        history: Vec::with_capacity(100),
     };
 
     let mut shutdown_code = None;
@@ -602,7 +647,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
         stdout.flush()?;
         stderr.flush()?;
 
-        match read_line(&mut input, &mut stdout) {
+        match read_line(&mut input, &mut stdout, &state.history) {
             Ok(_) => {}
             Err(ReadLineError::Shutdown(0)) => {
                 break;
@@ -622,6 +667,8 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
         if input.is_empty() {
             continue;
         }
+
+        state.history.push(input.to_string());
 
         match state.run_commands(input) {
             Ok(_) => state.last_exit_code = 0,
