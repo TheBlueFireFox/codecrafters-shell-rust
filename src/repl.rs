@@ -593,7 +593,11 @@ fn read_line_handle_key_event(
 ) -> Result<bool, ReadLineError> {
     match code {
         KeyCode::Up => {
-            *history_idx = (*history_idx - 1).max(1);
+            if history.is_empty() {
+                return Ok(true);
+            }
+            *history_idx = history_idx.saturating_sub(1);
+
             line.clear();
             line.push_str(&history[*history_idx]);
             stdout
@@ -603,7 +607,11 @@ fn read_line_handle_key_event(
             stdout.flush()?;
         }
         KeyCode::Down => {
+            if history.is_empty() || *history_idx == history.len() {
+                return Ok(true);
+            }
             *history_idx = (*history_idx + 1).min(history.len() - 1);
+
             line.clear();
             line.push_str(&history[*history_idx]);
             stdout
@@ -701,10 +709,12 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
+    let history = Vec::with_capacity(100);
+
     let mut state = State {
         last_exit_code: 0,
         path: std::env::current_dir().context("Current directory is invalid?")?,
-        history: Vec::with_capacity(100),
+        history,
     };
 
     let mut shutdown_code = None;
