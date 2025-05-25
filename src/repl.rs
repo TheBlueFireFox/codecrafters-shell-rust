@@ -264,8 +264,8 @@ impl State {
         rest: &[Cow<'name, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
-        let start = if rest.is_empty() {
-            0
+        let len = if rest.is_empty() {
+            self.history.len()
         } else {
             match rest[0].parse() {
                 Ok(k) => k,
@@ -277,8 +277,13 @@ impl State {
                 }
             }
         };
-        for (i, l) in self.history.iter().enumerate().skip(start + 1) {
-            writeln!(stdout, "    {} {}", i, l)?;
+        for (i, l) in self
+            .history
+            .iter()
+            .enumerate()
+            .skip(self.history.len() - len)
+        {
+            writeln!(stdout, "    {} {}", i + 1, l)?;
         }
         Ok(())
     }
@@ -696,15 +701,10 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
-    let mut history = Vec::with_capacity(100);
-
-    // add initial empty string to adjust the index range
-    history.push(String::new());
-
     let mut state = State {
         last_exit_code: 0,
         path: std::env::current_dir().context("Current directory is invalid?")?,
-        history,
+        history: Vec::with_capacity(100),
     };
 
     let mut shutdown_code = None;
