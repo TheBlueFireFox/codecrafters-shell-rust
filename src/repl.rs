@@ -261,10 +261,26 @@ impl State {
 
     fn run_history<'name>(
         &mut self,
-        _rest: &[Cow<'name, str>],
-        _stdout: &mut dyn std::io::Write,
+        rest: &[Cow<'name, str>],
+        stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
-        todo!()
+        let start = if rest.is_empty() {
+            0
+        } else {
+            match rest[0].parse() {
+                Ok(k) => k,
+                Err(_) => {
+                    return Err(Errors::IncorrectArgumentType(
+                        rest[0].clone(),
+                        "integer".into(),
+                    ));
+                }
+            }
+        };
+        for (i, l) in self.history.iter().enumerate().skip(start + 1) {
+            writeln!(stdout, "    {} {}", i, l)?;
+        }
+        Ok(())
     }
 
     fn run_type<'name>(
@@ -430,6 +446,7 @@ fn generate_completion() -> Result<Completion, TabHandlingError> {
     Ok(builder.build())
 }
 
+#[derive(Clone, Copy)]
 enum TabCompletionState {
     /// No completion required
     None,
@@ -522,14 +539,115 @@ enum ReadLineError {
     TabHandling(#[from] TabHandlingError),
 }
 
+fn read_line_handle_control(
+    line: &mut String,
+    stdout: &mut Stdout,
+    code: KeyCode,
+) -> Result<bool, ReadLineError> {
+    match code {
+        KeyCode::Char('l' | 'L') => {
+            stdout
+                .queue(terminal::Clear(terminal::ClearType::All))?
+                .queue(cursor::MoveTo(0, 0))?
+                .queue(style::Print(PROMT))?
+                .queue(style::Print(&line))?;
+
+            stdout.flush()?;
+        }
+        KeyCode::Char('d' | 'D') => {
+            // kill program
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+
+            return Err(ReadLineError::Shutdown(0));
+        }
+        KeyCode::Char('c' | 'C') => {
+            // new line
+            line.clear();
+
+            stdout
+                .queue(style::Print(NEWLINE_RAW_TERM))?
+                .queue(style::Print(PROMT))?;
+
+            stdout.flush()?;
+        }
+        KeyCode::Char('j' | 'J') => {
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            return Ok(false);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+fn read_line_handle_key_event(
+    line: &mut String,
+    stdout: &mut Stdout,
+    history: &[String],
+    history_idx: &mut usize,
+    code: KeyCode,
+) -> Result<bool, ReadLineError> {
+    match code {
+        KeyCode::Up => {
+            *history_idx = (*history_idx - 1).max(1);
+            line.clear();
+            line.push_str(&history[*history_idx]);
+            stdout
+                .queue(cursor::MoveToColumn(PROMT.len() as _))?
+                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
+                .queue(style::Print(&line))?;
+            stdout.flush()?;
+        }
+        KeyCode::Down => {
+            *history_idx = (*history_idx + 1).min(history.len() - 1);
+            line.clear();
+            line.push_str(&history[*history_idx]);
+            stdout
+                .queue(cursor::MoveToColumn(PROMT.len() as _))?
+                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
+                .queue(style::Print(&line))?;
+            stdout.flush()?;
+        }
+        KeyCode::Enter => {
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            return Ok(false);
+        }
+        KeyCode::Backspace => {
+            if line.pop().is_none() {
+                return Ok(true);
+            }
+            stdout
+                .queue(cursor::SavePosition)?
+                .queue(cursor::MoveToColumn(PROMT.len() as _))?
+                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
+                .queue(style::Print(&line))?
+                .queue(cursor::RestorePosition)?
+                .queue(cursor::MoveLeft(1))?;
+
+            stdout.flush()?;
+        }
+        KeyCode::Char('\r' | '\n') => {
+            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            return Ok(false);
+        }
+        KeyCode::Char(c) => {
+            stdout.execute(style::Print(c))?;
+
+            line.push(c);
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
 fn read_line_loop(
     line: &mut String,
     stdout: &mut Stdout,
-    _history: &[String],
+    history: &[String],
 ) -> Result<(), ReadLineError> {
     // load short hand
     let completion = generate_completion()?;
     let mut tab_state = TabCompletionState::None;
+    let mut history_idx = history.len();
     loop {
         match event::read()? {
             Event::Paste(s) => {
@@ -540,72 +658,20 @@ fn read_line_loop(
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => {
-                match code {
-                    KeyCode::Char('l' | 'L') => {
-                        stdout
-                            .queue(terminal::Clear(terminal::ClearType::All))?
-                            .queue(cursor::MoveTo(0, 0))?
-                            .queue(style::Print(PROMT))?
-                            .queue(style::Print(&line))?;
-
-                        stdout.flush()?;
-                    }
-                    KeyCode::Char('d' | 'D') => {
-                        // kill program
-                        stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-
-                        return Err(ReadLineError::Shutdown(0));
-                    }
-                    KeyCode::Char('j' | 'J') => {
-                        stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-                        break;
-                    }
-                    KeyCode::Char('c' | 'C') => {
-                        // new line
-                        line.clear();
-
-                        stdout
-                            .queue(style::Print(NEWLINE_RAW_TERM))?
-                            .queue(style::Print(PROMT))?;
-
-                        stdout.flush()?;
-                    }
-                    _ => {}
+                if !read_line_handle_control(line, stdout, code)? {
+                    break;
                 }
             }
-            Event::Key(KeyEvent { code, .. }) => match code {
-                KeyCode::Tab => {
-                    tab_state = handle_tab(stdout, line, &completion, tab_state)?;
-                }
-                KeyCode::Enter => {
-                    stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
+            Event::Key(KeyEvent {
+                code: KeyCode::Tab, ..
+            }) => {
+                tab_state = handle_tab(stdout, line, &completion, tab_state)?;
+            }
+            Event::Key(KeyEvent { code, .. }) => {
+                if !read_line_handle_key_event(line, stdout, history, &mut history_idx, code)? {
                     break;
                 }
-                KeyCode::Backspace => {
-                    if line.pop().is_none() {
-                        continue;
-                    }
-                    stdout
-                        .queue(cursor::SavePosition)?
-                        .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                        .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
-                        .queue(style::Print(&line))?
-                        .queue(cursor::RestorePosition)?
-                        .queue(cursor::MoveLeft(1))?;
-
-                    stdout.flush()?;
-                }
-                KeyCode::Char('\r' | '\n') => {
-                    stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-                    break;
-                }
-                KeyCode::Char(c) => {
-                    stdout.execute(style::Print(c))?;
-
-                    line.push(c);
-                }
-                _ => {}
-            },
+            }
             _ => (),
         }
     }
@@ -630,10 +696,15 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
+    let mut history = Vec::with_capacity(100);
+
+    // add initial empty string to adjust the index range
+    history.push(String::new());
+
     let mut state = State {
         last_exit_code: 0,
         path: std::env::current_dir().context("Current directory is invalid?")?,
-        history: Vec::with_capacity(100),
+        history,
     };
 
     let mut shutdown_code = None;
