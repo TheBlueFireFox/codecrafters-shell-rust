@@ -2,9 +2,9 @@ use std::{
     borrow::Cow,
     ffi::OsStr,
     fs::File,
-    io::{Stderr, Stdout, Write},
+    io::{Read, Seek, Stdout, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     str::FromStr,
 };
 
@@ -16,7 +16,7 @@ use crossterm::{
     terminal::{self, disable_raw_mode, enable_raw_mode},
     ExecutableCommand, QueueableCommand,
 };
-use itertools::Itertools;
+use memfile::MemFile;
 
 use crate::args;
 
@@ -36,18 +36,20 @@ enum Errors<'name> {
     IncorrectArgumentType(Cow<'name, str>, Cow<'name, str>),
     #[error("Path is not valid {0}")]
     IncorrectArgument(Cow<'name, str>),
-    #[error("Io Error {0}")]
+    #[error("Io Error <{0}>")]
     IoError(#[from] std::io::Error),
+    #[error("Parse Error {0}")]
+    ParseError(#[from] args::Error),
 }
 
-enum RedirectIO<T: std::io::Write + Into<Stdio>> {
+enum RedirectIO<T> {
     File(File),
     Other(T),
 }
 
 impl<T> From<RedirectIO<T>> for Stdio
 where
-    T: std::io::Write + Into<Stdio>,
+    T: Into<Stdio>,
 {
     fn from(value: RedirectIO<T>) -> Self {
         match value {
@@ -59,7 +61,7 @@ where
 
 impl<T> std::io::Write for RedirectIO<T>
 where
-    T: std::io::Write + Into<Stdio>,
+    T: std::io::Write,
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
@@ -76,86 +78,118 @@ where
     }
 }
 
-struct Redirect {
-    stdout: RedirectIO<Stdout>,
-    stderr: RedirectIO<Stderr>,
+struct Redirect<T> {
+    stdout: RedirectIO<T>,
+    stderr: RedirectIO<T>,
 }
 
-impl Default for Redirect {
-    fn default() -> Self {
-        Self {
-            stdout: RedirectIO::Other(std::io::stdout()),
-            stderr: RedirectIO::Other(std::io::stderr()),
+impl Redirect<MemFile> {
+    fn new_builtin(redirect: Option<args::Redirect>) -> std::io::Result<Self> {
+        // the last child may directly write to stdout
+        match redirect {
+            Some(redirect) => Self::new_program_with_redirect(redirect),
+            None => Self::new_program_no_redirect(),
         }
+    }
+
+    fn new_program_no_redirect() -> std::io::Result<Self> {
+        let stderr = MemFile::create_default("RedirectFileStdErr")?;
+        let stdout = MemFile::create_default("RedirectFileStdOut")?;
+
+        Ok(Self {
+            stdout: RedirectIO::Other(stdout),
+            stderr: RedirectIO::Other(stderr),
+        })
+    }
+
+    fn new_program_with_redirect(redirect: args::Redirect) -> std::io::Result<Self> {
+        let mut opts = File::options();
+        opts.create(true).write(true).read(true);
+
+        if redirect.append {
+            opts.append(true);
+        } else {
+            opts.truncate(true);
+        }
+
+        let file = opts.open(redirect.file_path)?;
+
+        let s = match redirect.to {
+            args::RedirectIO::Stdout => {
+                let stderr = MemFile::create_default("RedirectFileStdErr")?;
+                Self {
+                    stdout: RedirectIO::File(file),
+                    stderr: RedirectIO::Other(stderr),
+                }
+            }
+            args::RedirectIO::Stderr => {
+                let stdout = MemFile::create_default("RedirectFileStdOut")?;
+                Self {
+                    stdout: RedirectIO::Other(stdout),
+                    stderr: RedirectIO::File(file),
+                }
+            }
+        };
+        Ok(s)
     }
 }
 
-impl Redirect {
-    fn new(args: &[Cow<'_, str>]) -> std::io::Result<(Self, Option<usize>)> {
-        for (i, (operator, file_path)) in args.iter().tuple_windows().enumerate() {
-            match operator.as_ref() {
-                "1>" | ">" => {
-                    let stdout = File::options()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(file_path.as_ref())?;
+impl Redirect<Stdio> {
+    fn new_program(redirect: Option<args::Redirect>, is_last: bool) -> std::io::Result<Self> {
+        // the last child may directly write to stdout
+        match redirect {
+            Some(redirect) => Self::new_program_with_redirect(redirect, is_last),
+            None => Self::new_program_no_redirect(is_last),
+        }
+    }
 
-                    let s = Self {
-                        stdout: RedirectIO::File(stdout),
-                        ..Default::default()
-                    };
+    fn is_last<S: Into<Stdio>>(is_last: bool, s: impl Fn() -> S) -> Stdio {
+        if is_last {
+            s().into()
+        } else {
+            Stdio::piped()
+        }
+    }
 
-                    return Ok((s, Some(i)));
-                }
-                "2>" => {
-                    let stderr = File::options()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(file_path.as_ref())?;
+    fn new_program_with_redirect(redirect: args::Redirect, is_last: bool) -> std::io::Result<Self> {
+        let mut opts = File::options();
+        opts.create(true).write(true);
 
-                    let s = Self {
-                        stderr: RedirectIO::File(stderr),
-                        ..Default::default()
-                    };
-
-                    return Ok((s, Some(i)));
-                }
-                "1>>" | ">>" => {
-                    let stdout = File::options()
-                        .create(true)
-                        .append(true)
-                        .open(file_path.as_ref())?;
-
-                    let s = Self {
-                        stdout: RedirectIO::File(stdout),
-                        ..Default::default()
-                    };
-
-                    return Ok((s, Some(i)));
-                }
-                "2>>" => {
-                    let stderr = File::options()
-                        .create(true)
-                        .append(true)
-                        .open(file_path.as_ref())?;
-
-                    let s = Self {
-                        stderr: RedirectIO::File(stderr),
-                        ..Default::default()
-                    };
-
-                    return Ok((s, Some(i)));
-                }
-                _ => {}
-            }
+        if redirect.append {
+            opts.truncate(false).append(true);
+        } else {
+            opts.truncate(true);
         }
 
-        let stdout = RedirectIO::Other(std::io::stdout());
-        let stderr = RedirectIO::Other(std::io::stderr());
+        let file = opts.open(redirect.file_path)?;
 
-        Ok((Self { stdout, stderr }, None))
+        let s = match redirect.to {
+            args::RedirectIO::Stdout => {
+                let stderr = Self::is_last(is_last, std::io::stderr);
+                Self {
+                    stdout: RedirectIO::Other(Stdio::from(file)),
+                    stderr: RedirectIO::Other(stderr),
+                }
+            }
+            args::RedirectIO::Stderr => {
+                let stdout = Self::is_last(is_last, std::io::stdout);
+                Self {
+                    stdout: RedirectIO::Other(stdout),
+                    stderr: RedirectIO::Other(Stdio::from(file)),
+                }
+            }
+        };
+        Ok(s)
+    }
+
+    fn new_program_no_redirect(is_last: bool) -> std::io::Result<Self> {
+        let stdout = Self::is_last(is_last, std::io::stdout);
+        let stderr = Self::is_last(is_last, std::io::stderr);
+
+        Ok(Self {
+            stdout: RedirectIO::Other(stdout),
+            stderr: RedirectIO::Other(stderr),
+        })
     }
 }
 
@@ -188,6 +222,22 @@ impl<'input> TryFrom<&'input str> for Builtins {
 impl Builtins {
     fn supported() -> [&'static str; 6] {
         ["exit", "echo", "type", "pwd", "cd", "history"]
+    }
+}
+
+enum LastStdout {
+    Child(Child),
+    Builtin(RedirectIO<MemFile>),
+    None,
+}
+
+impl From<LastStdout> for Stdio {
+    fn from(value: LastStdout) -> Self {
+        match value {
+            LastStdout::Child(child) => child.stdout.map(Stdio::from).unwrap_or_else(Stdio::null),
+            LastStdout::Builtin(file) => Stdio::from(file),
+            LastStdout::None => Stdio::null(),
+        }
     }
 }
 
@@ -350,49 +400,119 @@ impl State {
         &self,
         com: &Cow<'com, str>,
         rest: &[Cow<'com, str>],
+        stdin: impl Into<Stdio>,
         stdout: impl Into<Stdio>,
         stderr: impl Into<Stdio>,
-    ) -> Result<(), Errors<'com>> {
+    ) -> Result<Child, Errors<'com>> {
         let _path = Self::is_program(com)?;
 
         // ugly alloc
         let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
-        let mut child = Command::new(com.as_ref())
+        let child = Command::new(com.as_ref())
             .args(args)
+            .stdin(stdin)
             .stdout(stdout)
             .stderr(stderr)
-            .spawn()
-            .expect("Failed to execute the child process");
+            .spawn()?;
 
-        let code = child.wait().expect("Failed to wait on child");
-        let code = code.code().unwrap_or(0);
-
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(Errors::ExitCode(code))
-        }
+        Ok(child)
     }
 
     fn run_commands<'com>(&mut self, command: &'com str) -> Result<(), Errors<'com>> {
-        let args = args::process_args(command);
+        let args = args::process_args(command)?;
 
-        let (mut redirect, from) = Redirect::new(&args)?;
+        let mut last_stdout = LastStdout::None;
+        let blocks = args.len();
 
-        // make sure that the redirect information is not passed to processing
-        let args = match from {
-            Some(s) => &args[..s],
-            None => &args[..],
-        };
+        for (i, block) in args.into_iter().enumerate() {
+            let is_last = i + 1 == blocks;
 
-        if let Ok(com) = args[0].as_ref().try_into() {
-            return self.run_builtins(com, &args[1..], &mut redirect.stdout, &mut redirect.stderr);
+            last_stdout = match block.command.as_ref().try_into() {
+                Ok(com) => self.run_commands_builtin(com, block, last_stdout),
+                Err(_) => self.run_commands_program(block, last_stdout, is_last),
+            }?;
         }
 
-        match self.run_program(&args[0], &args[1..], redirect.stdout, redirect.stderr) {
-            Ok(_) => Ok(()),
-            Err(Errors::CommandNotFound(_)) => Err(Errors::CommandNotFound(args[0].clone())),
-            err @ Err(_) => err,
+        match last_stdout {
+            LastStdout::None => Ok(()),
+            LastStdout::Child(mut child) => {
+                let code = child.wait()?;
+                let code = code.code().unwrap_or(0);
+
+                match code {
+                    0 => Ok(()),
+                    _ => Err(Errors::ExitCode(code)),
+                }
+            }
+            LastStdout::Builtin(redirect_io) => {
+                match redirect_io {
+                    RedirectIO::Other(mut m) => {
+                        let mut buf = String::new();
+                        m.read_to_string(&mut buf)?;
+                        print!("{}", buf);
+                    }
+                    RedirectIO::File(mut f) => {
+                        let mut buf = String::new();
+                        f.read_to_string(&mut buf)?;
+                        print!("{}", buf);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn run_commands_builtin<'com>(
+        &mut self,
+        com: Builtins,
+        block: args::Command<'com>,
+        last_stdout: LastStdout,
+    ) -> Result<LastStdout, Errors<'com>> {
+        if let LastStdout::Child(mut c) = last_stdout {
+            // we ignore the output as the builtins doesn't care about it
+            let c = c.wait()?;
+            let code = c.code().unwrap_or(0);
+            if code != 0 {
+                return Err(Errors::ExitCode(code));
+            }
+        }
+
+        let mut redirect = Redirect::new_builtin(block.redirect)?;
+
+        self.run_builtins(com, &block.args, &mut redirect.stdout, &mut redirect.stderr)?;
+
+        let mut s = redirect.stdout;
+
+        match &mut s {
+            RedirectIO::File(file) => {
+                file.seek(std::io::SeekFrom::Start(0))?;
+                Ok(LastStdout::None)
+            }
+            RedirectIO::Other(file) => {
+                file.seek(std::io::SeekFrom::Start(0))?;
+                Ok(LastStdout::Builtin(s))
+            }
+        }
+    }
+
+    fn run_commands_program<'com>(
+        &mut self,
+        block: args::Command<'com>,
+        last_stdout: LastStdout,
+        is_last: bool,
+    ) -> Result<LastStdout, Errors<'com>> {
+        let redirect = Redirect::new_program(block.redirect, is_last)?;
+
+        match self.run_program(
+            &block.command,
+            &block.args,
+            last_stdout,
+            redirect.stdout,
+            redirect.stderr,
+        ) {
+            Ok(child) => Ok(LastStdout::Child(child)),
+            Err(Errors::CommandNotFound(_)) => Err(Errors::CommandNotFound(block.command.clone())),
+            Err(err) => Err(err),
         }
     }
 }
@@ -538,7 +658,7 @@ const NEWLINE_RAW_TERM: &str = "\r\n";
 enum ReadLineError {
     #[error("Programshutdown")]
     Shutdown(i32),
-    #[error("IO ERROR <{0}>")]
+    #[error("Io Error <{0}>")]
     Io(#[from] std::io::Error),
     #[error("While handling the tab completion <{0}>")]
     TabHandling(#[from] TabHandlingError),
@@ -773,6 +893,9 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
                 writeln!(&stdout, "{}", e)?;
             }
             Err(e @ Errors::IoError(_)) => {
+                writeln!(&stdout, "{}", e)?;
+            }
+            Err(e @ Errors::ParseError(_)) => {
                 writeln!(&stdout, "{}", e)?;
             }
         }
