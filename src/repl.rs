@@ -39,17 +39,17 @@ struct State {
 }
 
 impl State {
-    fn is_builtin(com: &str) -> Result<(), Errors<'_>> {
+    fn is_builtin(com: &str) -> Result<(), Errors> {
         com.try_into().map(|_: Builtins| ())
     }
 
-    fn run_builtins<'name>(
+    fn run_builtins(
         &mut self,
         com: Builtins,
-        rest: &[Cow<'name, str>],
+        rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
         _stderr: &mut dyn std::io::Write,
-    ) -> Result<(), Errors<'name>> {
+    ) -> Result<(), Errors> {
         match com {
             Builtins::Exit => self.run_exit(rest),
             Builtins::Echo => self.run_echo(rest, stdout),
@@ -60,11 +60,11 @@ impl State {
         }
     }
 
-    fn run_cd<'name>(
+    fn run_cd(
         &mut self,
-        rest: &[Cow<'name, str>],
+        rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors<'name>> {
+    ) -> Result<(), Errors> {
         let new = &rest[0];
         let new = match new.chars().next() {
             Some('~') => {
@@ -91,23 +91,23 @@ impl State {
         Ok(())
     }
 
-    fn run_pwd<'name>(&self, stdout: &mut dyn std::io::Write) -> Result<(), Errors<'name>> {
+    fn run_pwd(&self, stdout: &mut dyn std::io::Write) -> Result<(), Errors> {
         let p = format!("{:?}", self.path);
         writeln!(stdout, "{}", p.trim_matches('"'))?;
         Ok(())
     }
 
-    fn run_history<'name>(
+    fn run_history(
         &self,
-        rest: &[Cow<'name, str>],
+        rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors<'name>> {
+    ) -> Result<(), Errors> {
         let len = match rest.first().map(|s| s.parse()) {
             None => self.history.len(),
             Some(Ok(k)) => k,
             Some(Err(_)) => {
                 return Err(Errors::IncorrectArgumentType(
-                    rest[0].clone(),
+                    rest[0].to_string(),
                     "integer".into(),
                 ));
             }
@@ -124,11 +124,11 @@ impl State {
         Ok(())
     }
 
-    fn run_type<'name>(
+    fn run_type(
         &self,
-        rest: &[Cow<'name, str>],
+        rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors<'name>> {
+    ) -> Result<(), Errors> {
         let com = rest[0].clone();
         if Self::is_builtin(com.as_ref()).is_ok() {
             writeln!(stdout, "{} is a shell builtin", com)?;
@@ -140,16 +140,16 @@ impl State {
         Ok(())
     }
 
-    fn run_echo<'name>(
+    fn run_echo(
         &self,
-        rest: &[Cow<'name, str>],
+        rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors<'name>> {
+    ) -> Result<(), Errors> {
         writeln!(stdout, "{}", rest.join(" "))?;
         Ok(())
     }
 
-    fn run_exit<'name>(&self, rest: &[Cow<'name, str>]) -> Result<(), Errors<'name>> {
+    fn run_exit(&self, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
         if rest.is_empty() {
             return Err(Errors::MissingArgument("exit".into()));
         }
@@ -160,12 +160,12 @@ impl State {
         }
 
         Err(Errors::IncorrectArgumentType(
-            rest[0].clone(),
+            rest[0].to_string(),
             "integer".into(),
         ))
     }
 
-    fn is_program<'a>(com: &Cow<'a, str>) -> Result<String, Errors<'a>> {
+    fn is_program(com: impl AsRef<str>) -> Result<String, Errors> {
         let paths = std::env::var("PATH").expect("PATH should have been set correctly");
         let mut pbuf = PathBuf::new();
         for path in paths.split(':').map(str::trim) {
@@ -179,22 +179,22 @@ impl State {
                     .to_string());
             }
         }
-        Err(Errors::CommandNotFound(com.clone()))
+        Err(Errors::CommandNotFound(com.as_ref().to_string()))
     }
 
-    fn run_program<'com>(
+    fn run_program(
         &self,
-        com: &Cow<'com, str>,
-        rest: &[Cow<'com, str>],
+        com: &str,
+        rest: &[Cow<'_, str>],
         stdin: impl Into<Stdio>,
         stdout: impl Into<Stdio>,
         stderr: impl Into<Stdio>,
-    ) -> Result<Child, Errors<'com>> {
+    ) -> Result<Child, Errors> {
         let _path = Self::is_program(com)?;
 
         // ugly alloc
         let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
-        let child = Command::new(com.as_ref())
+        let child = Command::new(com)
             .args(args)
             .stdin(stdin)
             .stdout(stdout)
@@ -204,7 +204,7 @@ impl State {
         Ok(child)
     }
 
-    fn run_commands<'com>(&mut self, command: &'com str) -> Result<(), Errors<'com>> {
+    fn run_commands(&mut self, command: &str) -> Result<(), Errors> {
         let args = args::process_args(command)?;
 
         let mut last_stdout = LastStdout::None;
@@ -248,12 +248,12 @@ impl State {
         }
     }
 
-    fn run_commands_builtin<'com>(
+    fn run_commands_builtin(
         &mut self,
         com: Builtins,
-        block: args::Command<'com>,
+        block: args::Command<'_>,
         last_stdout: LastStdout,
-    ) -> Result<LastStdout, Errors<'com>> {
+    ) -> Result<LastStdout, Errors> {
         if let LastStdout::Child(mut c) = last_stdout {
             // we ignore the output as the builtins doesn't care about it
             let c = c.wait()?;
@@ -281,12 +281,12 @@ impl State {
         }
     }
 
-    fn run_commands_program<'com>(
+    fn run_commands_program(
         &mut self,
-        block: args::Command<'com>,
+        block: args::Command<'_>,
         last_stdout: LastStdout,
         is_last: bool,
-    ) -> Result<LastStdout, Errors<'com>> {
+    ) -> Result<LastStdout, Errors> {
         let redirect = Redirect::new_program(block.redirect, is_last)?;
 
         match self.run_program(
@@ -297,7 +297,9 @@ impl State {
             redirect.stderr,
         ) {
             Ok(child) => Ok(LastStdout::Child(child)),
-            Err(Errors::CommandNotFound(_)) => Err(Errors::CommandNotFound(block.command.clone())),
+            Err(Errors::CommandNotFound(_)) => {
+                Err(Errors::CommandNotFound(block.command.to_string()))
+            }
             Err(err) => Err(err),
         }
     }

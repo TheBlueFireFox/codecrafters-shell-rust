@@ -1,21 +1,19 @@
 pub type ExitCode = i32;
 
-use std::borrow::Cow;
-
 use crate::args;
 
 #[derive(thiserror::Error, Debug)]
-pub enum Errors<'name> {
+pub enum Errors {
     #[error("exit code called {0}")]
     ExitCode(ExitCode),
     #[error("shutdown code called {0}")]
     Shutdown(ExitCode),
     #[error("{0}: command not found")]
-    CommandNotFound(Cow<'name, str>),
+    CommandNotFound(String),
     #[error("The command {0} is missing an argument")]
-    MissingArgument(Cow<'name, str>),
+    MissingArgument(String),
     #[error("The incorrect argument {0} should be a {1}")]
-    IncorrectArgumentType(Cow<'name, str>, Cow<'name, str>),
+    IncorrectArgumentType(String, String),
     #[error("Io Error <{0}>")]
     IoError(#[from] std::io::Error),
     #[error("Parse Error {0}")]
@@ -33,7 +31,7 @@ pub enum Builtins {
 }
 
 impl<'input> TryFrom<&'input str> for Builtins {
-    type Error = Errors<'input>;
+    type Error = Errors;
 
     fn try_from(value: &'input str) -> Result<Self, Self::Error> {
         match value {
