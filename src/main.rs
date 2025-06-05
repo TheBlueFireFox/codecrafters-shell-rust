@@ -1,5 +1,9 @@
 mod args;
 mod repl;
+mod builtin;
+mod redirect;
+mod completion;
+mod terminal;
 
 use repl::repl;
 

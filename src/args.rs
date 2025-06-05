@@ -507,6 +507,17 @@ mod test {
     }
 
     #[test]
+    fn multiple_single_quote_mixed() {
+        let txt = r#"echo 'example     script' 'shell''test' hello''world"#;
+        let exp: &[Cow<'_, str>] = &["echo","example     script", "shell", "test", "helloworld"].map(Into::into);
+        let v = process_args_inner(txt).expect("able to parse");
+        assert_eq!(1, v.len());
+        for (exp, got) in exp.iter().zip(&v[0]) {
+            assert_str_eq!(exp.as_ref(), got.as_ref());
+        }
+    }
+
+    #[test]
     fn single_quote_with_double() {
         let txt = "'\"AA\"'";
         let exp: &[Cow<'_, str>] = &["\"AA\""].map(Into::into);

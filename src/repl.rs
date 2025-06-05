@@ -1,229 +1,21 @@
 use std::{
     borrow::Cow,
-    ffi::OsStr,
-    fs::File,
-    io::{Read, Seek, Stdout, Write},
+    io::{Read, Seek, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     str::FromStr,
 };
 
-use anyhow::Context as _;
-use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    style,
-    terminal::{self, disable_raw_mode, enable_raw_mode},
-    ExecutableCommand, QueueableCommand,
-};
+use anyhow::Context;
+
 use memfile::MemFile;
 
-use crate::args;
-
-pub type ExitCode = i32;
-
-#[derive(thiserror::Error, Debug)]
-enum Errors<'name> {
-    #[error("exit code called {0}")]
-    ExitCode(ExitCode),
-    #[error("shutdown code called {0}")]
-    Shutdown(ExitCode),
-    #[error("{0}: command not found")]
-    CommandNotFound(Cow<'name, str>),
-    #[error("The command {0} is missing an argument")]
-    MissingArgument(Cow<'name, str>),
-    #[error("The incorrect argument {0} should be a {1}")]
-    IncorrectArgumentType(Cow<'name, str>, Cow<'name, str>),
-    #[error("Path is not valid {0}")]
-    IncorrectArgument(Cow<'name, str>),
-    #[error("Io Error <{0}>")]
-    IoError(#[from] std::io::Error),
-    #[error("Parse Error {0}")]
-    ParseError(#[from] args::Error),
-}
-
-enum RedirectIO<T> {
-    File(File),
-    Other(T),
-}
-
-impl<T> From<RedirectIO<T>> for Stdio
-where
-    T: Into<Stdio>,
-{
-    fn from(value: RedirectIO<T>) -> Self {
-        match value {
-            RedirectIO::File(file) => file.into(),
-            RedirectIO::Other(other) => other.into(),
-        }
-    }
-}
-
-impl<T> std::io::Write for RedirectIO<T>
-where
-    T: std::io::Write,
-{
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            RedirectIO::File(file) => file.write(buf),
-            RedirectIO::Other(other) => other.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            RedirectIO::File(file) => file.flush(),
-            RedirectIO::Other(other) => other.flush(),
-        }
-    }
-}
-
-struct Redirect<T> {
-    stdout: RedirectIO<T>,
-    stderr: RedirectIO<T>,
-}
-
-impl Redirect<MemFile> {
-    fn new_builtin(redirect: Option<args::Redirect>) -> std::io::Result<Self> {
-        // the last child may directly write to stdout
-        match redirect {
-            Some(redirect) => Self::new_program_with_redirect(redirect),
-            None => Self::new_program_no_redirect(),
-        }
-    }
-
-    fn new_program_no_redirect() -> std::io::Result<Self> {
-        let stderr = MemFile::create_default("RedirectFileStdErr")?;
-        let stdout = MemFile::create_default("RedirectFileStdOut")?;
-
-        Ok(Self {
-            stdout: RedirectIO::Other(stdout),
-            stderr: RedirectIO::Other(stderr),
-        })
-    }
-
-    fn new_program_with_redirect(redirect: args::Redirect) -> std::io::Result<Self> {
-        let mut opts = File::options();
-        opts.create(true).write(true).read(true);
-
-        if redirect.append {
-            opts.append(true);
-        } else {
-            opts.truncate(true);
-        }
-
-        let file = opts.open(redirect.file_path)?;
-
-        let s = match redirect.to {
-            args::RedirectIO::Stdout => {
-                let stderr = MemFile::create_default("RedirectFileStdErr")?;
-                Self {
-                    stdout: RedirectIO::File(file),
-                    stderr: RedirectIO::Other(stderr),
-                }
-            }
-            args::RedirectIO::Stderr => {
-                let stdout = MemFile::create_default("RedirectFileStdOut")?;
-                Self {
-                    stdout: RedirectIO::Other(stdout),
-                    stderr: RedirectIO::File(file),
-                }
-            }
-        };
-        Ok(s)
-    }
-}
-
-impl Redirect<Stdio> {
-    fn new_program(redirect: Option<args::Redirect>, is_last: bool) -> std::io::Result<Self> {
-        // the last child may directly write to stdout
-        match redirect {
-            Some(redirect) => Self::new_program_with_redirect(redirect, is_last),
-            None => Self::new_program_no_redirect(is_last),
-        }
-    }
-
-    fn is_last<S: Into<Stdio>>(is_last: bool, s: impl Fn() -> S) -> Stdio {
-        if is_last {
-            s().into()
-        } else {
-            Stdio::piped()
-        }
-    }
-
-    fn new_program_with_redirect(redirect: args::Redirect, is_last: bool) -> std::io::Result<Self> {
-        let mut opts = File::options();
-        opts.create(true).write(true);
-
-        if redirect.append {
-            opts.truncate(false).append(true);
-        } else {
-            opts.truncate(true);
-        }
-
-        let file = opts.open(redirect.file_path)?;
-
-        let s = match redirect.to {
-            args::RedirectIO::Stdout => {
-                let stderr = Self::is_last(is_last, std::io::stderr);
-                Self {
-                    stdout: RedirectIO::Other(Stdio::from(file)),
-                    stderr: RedirectIO::Other(stderr),
-                }
-            }
-            args::RedirectIO::Stderr => {
-                let stdout = Self::is_last(is_last, std::io::stdout);
-                Self {
-                    stdout: RedirectIO::Other(stdout),
-                    stderr: RedirectIO::Other(Stdio::from(file)),
-                }
-            }
-        };
-        Ok(s)
-    }
-
-    fn new_program_no_redirect(is_last: bool) -> std::io::Result<Self> {
-        let stdout = Self::is_last(is_last, std::io::stdout);
-        let stderr = Self::is_last(is_last, std::io::stderr);
-
-        Ok(Self {
-            stdout: RedirectIO::Other(stdout),
-            stderr: RedirectIO::Other(stderr),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Builtins {
-    Exit,
-    Echo,
-    Type,
-    Pwd,
-    Cd,
-    History,
-}
-
-impl<'input> TryFrom<&'input str> for Builtins {
-    type Error = Errors<'input>;
-
-    fn try_from(value: &'input str) -> Result<Self, Self::Error> {
-        match value {
-            "exit" => Ok(Self::Exit),
-            "echo" => Ok(Self::Echo),
-            "type" => Ok(Self::Type),
-            "pwd" => Ok(Self::Pwd),
-            "cd" => Ok(Self::Cd),
-            "history" => Ok(Self::History),
-            _ => Err(Errors::CommandNotFound(value.into())),
-        }
-    }
-}
-
-impl Builtins {
-    fn supported() -> [&'static str; 6] {
-        ["exit", "echo", "type", "pwd", "cd", "history"]
-    }
-}
+use crate::{
+    args,
+    builtin::{Builtins, Errors, ExitCode},
+    redirect::{Redirect, RedirectIO},
+    terminal::{read_line, ReadLineError, PROMT},
+};
 
 enum LastStdout {
     Child(Child),
@@ -303,14 +95,14 @@ impl State {
         Ok(())
     }
 
-    fn run_pwd<'name>(&mut self, stdout: &mut dyn std::io::Write) -> Result<(), Errors<'name>> {
+    fn run_pwd<'name>(&self, stdout: &mut dyn std::io::Write) -> Result<(), Errors<'name>> {
         let p = format!("{:?}", self.path);
         writeln!(stdout, "{}", p.trim_matches('"'))?;
         Ok(())
     }
 
     fn run_history<'name>(
-        &mut self,
+        &self,
         rest: &[Cow<'name, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
@@ -339,7 +131,7 @@ impl State {
     }
 
     fn run_type<'name>(
-        &mut self,
+        &self,
         rest: &[Cow<'name, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
@@ -355,7 +147,7 @@ impl State {
     }
 
     fn run_echo<'name>(
-        &mut self,
+        &self,
         rest: &[Cow<'name, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
@@ -363,7 +155,7 @@ impl State {
         Ok(())
     }
 
-    fn run_exit<'name>(&mut self, rest: &[Cow<'name, str>]) -> Result<(), Errors<'name>> {
+    fn run_exit<'name>(&self, rest: &[Cow<'name, str>]) -> Result<(), Errors<'name>> {
         if rest.is_empty() {
             return Err(Errors::MissingArgument("exit".into()));
         }
@@ -515,312 +307,6 @@ impl State {
             Err(err) => Err(err),
         }
     }
-}
-
-type Completion = trie_rs::Trie<u8>;
-
-#[derive(Debug, thiserror::Error)]
-enum TabHandlingError {
-    #[error("PATH env is not set")]
-    MissingPathEnv,
-    #[error("File in PATH has not existing path name <{0}>")]
-    FileNameMissing(PathBuf),
-    #[error("Io Error <{0}>")]
-    Io(#[from] std::io::Error),
-}
-
-fn generate_program_names() -> Result<Vec<String>, TabHandlingError> {
-    let mut v = vec![];
-    let paths = std::env::var("PATH").map_err(|_| TabHandlingError::MissingPathEnv)?;
-
-    let process_file = |file: PathBuf| {
-        file.file_name()
-            .and_then(OsStr::to_str)
-            .map(str::to_owned)
-            .ok_or(TabHandlingError::FileNameMissing(file))
-    };
-
-    for path in std::env::split_paths(&paths).filter(|e| e.exists()) {
-        for file in std::fs::read_dir(path)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|e| e.is_file())
-        {
-            let name = process_file(file)?;
-            v.push(name);
-        }
-    }
-
-    Ok(v)
-}
-
-fn generate_completion() -> Result<Completion, TabHandlingError> {
-    let mut builder = trie_rs::TrieBuilder::new();
-
-    // add builtins
-    for s in Builtins::supported() {
-        builder.push(s);
-    }
-
-    // program names
-    let exes = generate_program_names()?;
-    for s in exes {
-        builder.push(s);
-    }
-
-    Ok(builder.build())
-}
-
-#[derive(Clone, Copy)]
-enum TabCompletionState {
-    /// No completion required
-    None,
-    FirstRound,
-    // SecondRound,
-}
-
-fn handle_tab(
-    stdout: &mut Stdout,
-    line: &mut String,
-    completion: &Completion,
-    state: TabCompletionState,
-) -> std::io::Result<TabCompletionState> {
-    let matches: Vec<String> = completion.predictive_search(line.as_bytes()).collect();
-
-    match matches.len() {
-        0 => {
-            stdout.execute(style::Print(BELL))?;
-            return Ok(TabCompletionState::None);
-        }
-        1 => {
-            // we found a match
-            line.clear();
-            line.push_str(&matches[0]);
-            line.push(' ');
-
-            stdout
-                .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                .queue(style::Print(&line))?;
-
-            stdout.flush()?;
-            return Ok(TabCompletionState::None);
-        }
-        _ => {}
-    }
-
-    let prefix: Option<String> = completion.longest_prefix(line.as_bytes());
-
-    if let Some(s) = prefix {
-        if s[..] != line[..] {
-            line.clear();
-            line.push_str(&s);
-
-            stdout
-                .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                .queue(style::Print(&line))?
-                .flush()?;
-
-            stdout.flush()?;
-
-            return Ok(TabCompletionState::FirstRound);
-        }
-    }
-
-    if let TabCompletionState::None = state {
-        // ring the bell
-        stdout.execute(style::Print(BELL))?;
-        return Ok(TabCompletionState::FirstRound);
-    }
-
-    stdout.queue(style::Print(NEWLINE_RAW_TERM))?;
-
-    for option in matches {
-        stdout
-            .queue(style::Print(&option))?
-            .queue(style::Print("  "))?;
-    }
-
-    stdout
-        .queue(style::Print(NEWLINE_RAW_TERM))?
-        .queue(style::Print(PROMT))?
-        .queue(style::Print(line))?;
-
-    stdout.flush()?;
-
-    Ok(TabCompletionState::None)
-}
-
-const PROMT: &str = "$ ";
-const BELL: char = '\u{07}';
-const NEWLINE_RAW_TERM: &str = "\r\n";
-
-#[derive(Debug, thiserror::Error)]
-enum ReadLineError {
-    #[error("Programshutdown")]
-    Shutdown(i32),
-    #[error("Io Error <{0}>")]
-    Io(#[from] std::io::Error),
-    #[error("While handling the tab completion <{0}>")]
-    TabHandling(#[from] TabHandlingError),
-}
-
-fn read_line_handle_control(
-    line: &mut String,
-    stdout: &mut Stdout,
-    code: KeyCode,
-) -> Result<bool, ReadLineError> {
-    match code {
-        KeyCode::Char('l' | 'L') => {
-            stdout
-                .queue(terminal::Clear(terminal::ClearType::All))?
-                .queue(cursor::MoveTo(0, 0))?
-                .queue(style::Print(PROMT))?
-                .queue(style::Print(&line))?;
-
-            stdout.flush()?;
-        }
-        KeyCode::Char('d' | 'D') => {
-            // kill program
-            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-
-            return Err(ReadLineError::Shutdown(0));
-        }
-        KeyCode::Char('c' | 'C') => {
-            // new line
-            line.clear();
-
-            stdout
-                .queue(style::Print(NEWLINE_RAW_TERM))?
-                .queue(style::Print(PROMT))?;
-
-            stdout.flush()?;
-        }
-        KeyCode::Char('j' | 'J') => {
-            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-            return Ok(false);
-        }
-        _ => {}
-    }
-    Ok(true)
-}
-
-fn read_line_handle_key_event(
-    line: &mut String,
-    stdout: &mut Stdout,
-    history: &[String],
-    history_idx: &mut usize,
-    code: KeyCode,
-) -> Result<bool, ReadLineError> {
-    match code {
-        KeyCode::Up => {
-            if history.is_empty() {
-                return Ok(true);
-            }
-            *history_idx = history_idx.saturating_sub(1);
-
-            line.clear();
-            line.push_str(&history[*history_idx]);
-            stdout
-                .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
-                .queue(style::Print(&line))?;
-            stdout.flush()?;
-        }
-        KeyCode::Down => {
-            if history.is_empty() || *history_idx == history.len() {
-                return Ok(true);
-            }
-            *history_idx = (*history_idx + 1).min(history.len() - 1);
-
-            line.clear();
-            line.push_str(&history[*history_idx]);
-            stdout
-                .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
-                .queue(style::Print(&line))?;
-            stdout.flush()?;
-        }
-        KeyCode::Enter => {
-            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-            return Ok(false);
-        }
-        KeyCode::Backspace => {
-            if line.pop().is_none() {
-                return Ok(true);
-            }
-            stdout
-                .queue(cursor::SavePosition)?
-                .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                .queue(terminal::Clear(terminal::ClearType::UntilNewLine))?
-                .queue(style::Print(&line))?
-                .queue(cursor::RestorePosition)?
-                .queue(cursor::MoveLeft(1))?;
-
-            stdout.flush()?;
-        }
-        KeyCode::Char('\r' | '\n') => {
-            stdout.execute(style::Print(NEWLINE_RAW_TERM))?;
-            return Ok(false);
-        }
-        KeyCode::Char(c) => {
-            stdout.execute(style::Print(c))?;
-
-            line.push(c);
-        }
-        _ => {}
-    }
-    Ok(true)
-}
-
-fn read_line_loop(
-    line: &mut String,
-    stdout: &mut Stdout,
-    history: &[String],
-) -> Result<(), ReadLineError> {
-    // load short hand
-    let completion = generate_completion()?;
-    let mut tab_state = TabCompletionState::None;
-    let mut history_idx = history.len();
-    loop {
-        match event::read()? {
-            Event::Paste(s) => {
-                line.push_str(&s);
-            }
-            Event::Key(KeyEvent {
-                code,
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                if !read_line_handle_control(line, stdout, code)? {
-                    break;
-                }
-            }
-            Event::Key(KeyEvent {
-                code: KeyCode::Tab, ..
-            }) => {
-                tab_state = handle_tab(stdout, line, &completion, tab_state)?;
-            }
-            Event::Key(KeyEvent { code, .. }) => {
-                if !read_line_handle_key_event(line, stdout, history, &mut history_idx, code)? {
-                    break;
-                }
-            }
-            _ => (),
-        }
-    }
-
-    Ok(())
-}
-
-fn read_line(
-    line: &mut String,
-    stdout: &mut Stdout,
-    history: &[String],
-) -> Result<(), ReadLineError> {
-    enable_raw_mode()?;
-    let res = read_line_loop(line, stdout, history);
-    disable_raw_mode()?;
-    res
 }
 
 pub fn repl() -> anyhow::Result<Option<ExitCode>> {
