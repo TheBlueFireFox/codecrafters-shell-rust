@@ -102,19 +102,17 @@ impl State {
         rest: &[Cow<'name, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
-        let len = if rest.is_empty() {
-            self.history.len()
-        } else {
-            match rest[0].parse() {
-                Ok(k) => k,
-                Err(_) => {
-                    return Err(Errors::IncorrectArgumentType(
-                        rest[0].clone(),
-                        "integer".into(),
-                    ));
-                }
+        let len = match rest.first().map(|s| s.parse()) {
+            None => self.history.len(),
+            Some(Ok(k)) => k,
+            Some(Err(_)) => {
+                return Err(Errors::IncorrectArgumentType(
+                    rest[0].clone(),
+                    "integer".into(),
+                ));
             }
         };
+
         for (i, l) in self
             .history
             .iter()
