@@ -229,7 +229,8 @@ mod history {
                     .truncate(true)
                     .open(path.as_ref())?;
 
-                let s = state.history.history.join("\n");
+                let mut s = state.history.history.join("\n");
+                s.push('\n');
                 file.write_all(s.as_bytes())?;
 
                 state.history.appended = state.history.history.len();
@@ -245,10 +246,12 @@ mod history {
             Some(path) => {
                 let mut file = std::fs::OpenOptions::new()
                     .append(true)
+                    .read(true)
                     .create(true)
                     .open(path.as_ref())?;
 
-                let s = state.history.history[state.history.appended..].join("\n");
+                let mut s = state.history.history[state.history.appended..].join("\n");
+                s.push('\n');
                 file.write_all(s.as_bytes())?;
 
                 state.history.appended = state.history.history.len();
@@ -264,7 +267,8 @@ mod history {
                 let mut file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
                 let mut s = String::new();
                 file.read_to_string(&mut s)?;
-                state.history.history.extend(s.lines().map(String::from));
+                let lines = s.lines().filter(|s| !s.is_empty()).map(String::from);
+                state.history.history.extend(lines);
                 state.history.appended = state.history.history.len();
                 Ok(())
             }
