@@ -16,8 +16,6 @@ pub enum Errors<'name> {
     MissingArgument(Cow<'name, str>),
     #[error("The incorrect argument {0} should be a {1}")]
     IncorrectArgumentType(Cow<'name, str>, Cow<'name, str>),
-    #[error("Path is not valid {0}")]
-    IncorrectArgument(Cow<'name, str>),
     #[error("Io Error <{0}>")]
     IoError(#[from] std::io::Error),
     #[error("Parse Error {0}")]

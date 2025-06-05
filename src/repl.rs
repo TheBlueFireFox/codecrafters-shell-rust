@@ -3,7 +3,6 @@ use std::{
     io::{Read, Seek, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    str::FromStr,
 };
 
 use anyhow::Context;
@@ -66,32 +65,29 @@ impl State {
         rest: &[Cow<'name, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors<'name>> {
-        let mut old = self.path.clone();
-        let new = rest[0].clone();
-        // absolute
-        let new = if new.starts_with('/') {
-            PathBuf::from_str(new.as_ref()).or(Err(Errors::IncorrectArgument(new)))?
-        } else if new.starts_with('~') {
-            // home case
-            let hm = std::env::var("HOME").expect("error getting HOME env variable");
-            let mut hm = PathBuf::from_str(&hm).expect("HOME Environment variable is not valid");
-            hm.push(new.trim_start_matches('~'));
-            hm
-        } else {
-            old.push(new.as_ref());
-            old
+        let new = &rest[0];
+        let new = match new.chars().next() {
+            Some('~') => {
+                // home case
+                let hm: PathBuf = std::env::var("HOME")
+                    .expect("error getting HOME env variable")
+                    .into();
+                hm.join(new.trim_start_matches('~'))
+            }
+            Some('/') => new.as_ref().into(),
+            Some(_) => self.path.join(new.as_ref()),
+            None => panic!("new path should not be empty"),
         };
 
         if new.is_dir() {
             self.path = std::fs::canonicalize(new)?;
-        } else {
-            let p = format!("{:?}", new);
-            writeln!(
-                stdout,
-                "cd: {}: No such file or directory",
-                p.trim_matches('"')
-            )?;
+            return Ok(());
         }
+
+        let p = format!("{:?}", new);
+        let p = p.trim_matches('"');
+        writeln!(stdout, "cd: {}: No such file or directory", p)?;
+
         Ok(())
     }
 
@@ -373,9 +369,6 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
                 writeln!(&stdout, "{}", e)?;
             }
             Err(e @ Errors::IncorrectArgumentType(_, _)) => {
-                writeln!(&stdout, "{}", e)?;
-            }
-            Err(e @ Errors::IncorrectArgument(_)) => {
                 writeln!(&stdout, "{}", e)?;
             }
             Err(e @ Errors::IoError(_)) => {
