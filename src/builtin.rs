@@ -194,7 +194,7 @@ pub mod history {
     use std::{
         borrow::Cow,
         io::{Read, Seek, Write},
-        path::Path,
+        path::{Path, PathBuf},
     };
 
     use itertools::Itertools;
@@ -202,11 +202,6 @@ pub mod history {
     use crate::repl::State;
 
     use super::Errors;
-
-    pub struct History {
-        pub history: Vec<String>,
-        pub appended: usize,
-    }
 
     pub fn run(
         state: &mut State,
@@ -227,19 +222,48 @@ pub mod history {
         }
     }
 
+    #[derive(Clone, Debug)]
+    pub struct History {
+        pub history: Vec<String>,
+        appended: usize,
+        org: Option<OrgFile>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct OrgFile {
+        path: PathBuf,
+        read_lines: usize,
+    }
+
+    impl Drop for History {
+        fn drop(&mut self) {
+            let Some(org) = self.org.clone() else {
+                return;
+            };
+            Self::append_history_to_file(self, org.path, org.read_lines)
+                .expect("can write to history");
+        }
+    }
+
     impl History {
         pub fn new() -> Result<Self, Errors> {
             let s = Self {
                 history: Vec::with_capacity(100),
                 appended: 0,
+                org: None,
             };
             Ok(s)
         }
         pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Errors> {
             let lines = Self::read_history_from_file(path.as_ref())?;
+            let len = lines.len();
             let s = Self {
                 history: lines,
                 appended: 0,
+                org: Some(OrgFile {
+                    path: path.as_ref().into(),
+                    read_lines: len,
+                }),
             };
 
             Ok(s)
@@ -268,39 +292,7 @@ pub mod history {
         fn append_history(&mut self, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
             match rest.first() {
                 None => Err(Errors::MissingArgument("history".to_string())),
-                Some(path) => {
-                    let mut file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .truncate(false)
-                        .read(true)
-                        .write(true)
-                        .open(path.as_ref())?;
-
-                    let it = self.history[self.appended..]
-                        .iter()
-                        .map(AsRef::as_ref)
-                        .interleave(itertools::repeat_n(
-                            "\n",
-                            self.history.len().saturating_sub(self.appended),
-                        ));
-
-                    let mut s = String::new();
-                    file.read_to_string(&mut s)?;
-
-                    if !s.ends_with('\n') {
-                        s.push('\n');
-                    }
-
-                    file.set_len(0)?;
-
-                    file.seek(std::io::SeekFrom::Start(0))?;
-
-                    s.extend(it);
-                    file.write_all(s.as_bytes())?;
-
-                    self.appended = self.history.len();
-                    Ok(())
-                }
+                Some(path) => Self::append_history_to_file(self, path.as_ref(), self.appended),
             }
         }
 
@@ -316,14 +308,6 @@ pub mod history {
             }
         }
 
-        fn read_history_from_file(path: impl AsRef<Path>) -> Result<Vec<String>, Errors> {
-            let mut file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
-            let mut s = String::new();
-            file.read_to_string(&mut s)?;
-            let s = s.lines().map(String::from).collect();
-            Ok(s)
-        }
-
         fn print_history(
             &self,
             count: Option<usize>,
@@ -335,6 +319,53 @@ pub mod history {
             for (i, l) in self.history.iter().enumerate().skip(s) {
                 writeln!(stdout, "    {} {}", i + 1, l)?;
             }
+            Ok(())
+        }
+
+        fn read_history_from_file(path: impl AsRef<Path>) -> Result<Vec<String>, Errors> {
+            let mut file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
+            let mut s = String::new();
+            file.read_to_string(&mut s)?;
+            let s = s.lines().map(String::from).collect();
+            Ok(s)
+        }
+
+        fn append_history_to_file(
+            &mut self,
+            path: impl AsRef<Path>,
+            count: usize,
+        ) -> Result<(), Errors> {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path.as_ref())?;
+
+            let it =
+                self.history[count..]
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .interleave(itertools::repeat_n(
+                        "\n",
+                        self.history.len().saturating_sub(count),
+                    ));
+
+            let mut s = String::new();
+            file.read_to_string(&mut s)?;
+
+            if !s.ends_with('\n') {
+                s.push('\n');
+            }
+
+            file.set_len(0)?;
+
+            file.seek(std::io::SeekFrom::Start(0))?;
+
+            s.extend(it);
+            file.write_all(s.as_bytes())?;
+
+            self.appended = self.history.len();
             Ok(())
         }
     }
