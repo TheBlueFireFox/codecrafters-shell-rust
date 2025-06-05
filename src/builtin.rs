@@ -190,7 +190,7 @@ mod exit {
     }
 }
 
-mod history {
+pub mod history {
     use std::{
         borrow::Cow,
         io::{Read, Seek, Write},
@@ -202,114 +202,117 @@ mod history {
 
     use super::Errors;
 
+    pub struct History {
+        pub history: Vec<String>,
+        pub appended: usize,
+    }
+
     pub fn run(
         state: &mut State,
         rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
     ) -> Result<(), Errors> {
         match rest.first().map(AsRef::as_ref) {
-            None => print_history(state, None, stdout),
-            Some("-r") => read_history(state, &rest[1..]),
-            Some("-w") => write_history(state, &rest[1..]),
-            Some("-a") => append_history(state, &rest[1..]),
+            None => state.history.print_history(None, stdout),
+            Some("-r") => state.history.read_history(&rest[1..]),
+            Some("-w") => state.history.write_history(&rest[1..]),
+            Some("-a") => state.history.append_history(&rest[1..]),
             Some(v) => {
                 let count = v.parse().map_err(|_| {
                     Errors::IncorrectArgumentType(v.to_string(), "Integer".to_string())
                 })?;
-                print_history(state, Some(count), stdout)
+                state.history.print_history(Some(count), stdout)
             }
         }
     }
 
-    fn write_history(state: &mut State, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
-        match rest.first() {
-            None => Err(Errors::MissingArgument("history".to_string())),
-            Some(path) => {
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(path.as_ref())?;
+    impl History {
+        fn write_history(&mut self, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
+            match rest.first() {
+                None => Err(Errors::MissingArgument("history".to_string())),
+                Some(path) => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(path.as_ref())?;
 
-                let s = state.history.history.join("\n");
-                file.write_all(s.as_bytes())?;
+                    let s = self.history.join("\n");
+                    file.write_all(s.as_bytes())?;
 
-                state.history.appended = state.history.history.len();
+                    self.appended = self.history.len();
 
-                Ok(())
-            }
-        }
-    }
-
-    fn append_history(state: &mut State, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
-        match rest.first() {
-            None => Err(Errors::MissingArgument("history".to_string())),
-            Some(path) => {
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .read(true)
-                    .write(true)
-                    .open(path.as_ref())?;
-
-                let it = state.history.history[state.history.appended..]
-                    .iter()
-                    .map(AsRef::as_ref)
-                    .interleave(itertools::repeat_n(
-                        "\n",
-                        state
-                            .history
-                            .history
-                            .len()
-                            .saturating_sub(state.history.appended),
-                    ));
-
-                let mut s = String::new();
-                file.read_to_string(&mut s)?;
-
-                if !s.ends_with('\n') {
-                    s.push('\n');
+                    Ok(())
                 }
-
-                file.set_len(0)?;
-
-                file.seek(std::io::SeekFrom::Start(0))?;
-
-                s.extend(it);
-                file.write_all(s.as_bytes())?;
-
-                state.history.appended = state.history.history.len();
-                Ok(())
             }
         }
-    }
 
-    fn read_history(state: &mut State, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
-        match rest.first() {
-            None => Err(Errors::MissingArgument("history".to_string())),
-            Some(path) => {
-                let mut file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
-                let mut s = String::new();
-                file.read_to_string(&mut s)?;
-                let lines = s.lines().map(String::from);
-                state.history.history.extend(lines);
-                state.history.appended = state.history.history.len();
-                Ok(())
+        fn append_history(&mut self, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
+            match rest.first() {
+                None => Err(Errors::MissingArgument("history".to_string())),
+                Some(path) => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(path.as_ref())?;
+
+                    let it = self.history[self.appended..]
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .interleave(itertools::repeat_n(
+                            "\n",
+                            self.history.len().saturating_sub(self.appended),
+                        ));
+
+                    let mut s = String::new();
+                    file.read_to_string(&mut s)?;
+
+                    if !s.ends_with('\n') {
+                        s.push('\n');
+                    }
+
+                    file.set_len(0)?;
+
+                    file.seek(std::io::SeekFrom::Start(0))?;
+
+                    s.extend(it);
+                    file.write_all(s.as_bytes())?;
+
+                    self.appended = self.history.len();
+                    Ok(())
+                }
             }
         }
-    }
 
-    fn print_history(
-        state: &State,
-        count: Option<usize>,
-        stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors> {
-        let other = count.unwrap_or(state.history.history.len());
-        let s = state.history.history.len().saturating_sub(other);
-
-        for (i, l) in state.history.history.iter().enumerate().skip(s) {
-            writeln!(stdout, "    {} {}", i + 1, l)?;
+        fn read_history(&mut self, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
+            match rest.first() {
+                None => Err(Errors::MissingArgument("history".to_string())),
+                Some(path) => {
+                    let mut file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
+                    let mut s = String::new();
+                    file.read_to_string(&mut s)?;
+                    let lines = s.lines().map(String::from);
+                    self.history.extend(lines);
+                    self.appended = self.history.len();
+                    Ok(())
+                }
+            }
         }
-        Ok(())
+
+        fn print_history(
+            &self,
+            count: Option<usize>,
+            stdout: &mut dyn std::io::Write,
+        ) -> Result<(), Errors> {
+            let other = count.unwrap_or(self.history.len());
+            let s = self.history.len().saturating_sub(other);
+
+            for (i, l) in self.history.iter().enumerate().skip(s) {
+                writeln!(stdout, "    {} {}", i + 1, l)?;
+            }
+            Ok(())
+        }
     }
 }

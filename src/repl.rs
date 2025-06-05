@@ -11,7 +11,7 @@ use memfile::MemFile;
 
 use crate::{
     args,
-    builtin::{self, is_program, Builtins, Errors, ExitCode},
+    builtin::{self, history, is_program, Builtins, Errors, ExitCode},
     redirect::{Redirect, RedirectIO},
     terminal::{read_line, ReadLineError, PROMT},
 };
@@ -32,15 +32,10 @@ impl From<LastStdout> for Stdio {
     }
 }
 
-pub struct History {
-    pub history: Vec<String>,
-    pub appended: usize,
-}
-
 pub struct State {
     pub last_exit_code: ExitCode,
     pub path: PathBuf,
-    pub history: History,
+    pub history: history::History,
 }
 
 impl State {
@@ -182,7 +177,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
-    let history = History {
+    let history = history::History {
         history: Vec::with_capacity(100),
         appended: 0,
     };
