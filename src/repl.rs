@@ -177,10 +177,10 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
-    let history = history::History {
-        history: Vec::with_capacity(100),
-        appended: 0,
-    };
+    let history = match std::env::var_os("HISTFILE") {
+        None => history::History::new(),
+        Some(path) => history::History::from_file(path),
+    }?;
 
     let mut state = State {
         last_exit_code: 0,
