@@ -66,12 +66,12 @@ impl Redirect<MemFile> {
 
     fn new_program_with_redirect(redirect: args::Redirect) -> std::io::Result<Self> {
         let mut opts = File::options();
-        opts.create(true).write(true).read(true);
+        opts.create(true).read(true);
 
         if redirect.append {
             opts.append(true);
         } else {
-            opts.truncate(true);
+            opts.truncate(true).write(true);
         }
 
         let file = opts.open(redirect.file_path)?;
