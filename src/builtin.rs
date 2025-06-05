@@ -193,8 +193,10 @@ mod exit {
 mod history {
     use std::{
         borrow::Cow,
-        io::{Read, Write},
+        io::{Read, Seek, Write},
     };
+
+    use itertools::Itertools;
 
     use crate::repl::State;
 
@@ -229,8 +231,7 @@ mod history {
                     .truncate(true)
                     .open(path.as_ref())?;
 
-                let mut s = state.history.history.join("\n");
-                s.push('\n');
+                let s = state.history.history.join("\n");
                 file.write_all(s.as_bytes())?;
 
                 state.history.appended = state.history.history.len();
@@ -245,13 +246,36 @@ mod history {
             None => Err(Errors::MissingArgument("history".to_string())),
             Some(path) => {
                 let mut file = std::fs::OpenOptions::new()
-                    .append(true)
-                    .read(true)
                     .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
                     .open(path.as_ref())?;
 
-                let mut s = state.history.history[state.history.appended..].join("\n");
-                s.push('\n');
+                let it = state.history.history[state.history.appended..]
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .interleave(itertools::repeat_n(
+                        "\n",
+                        state
+                            .history
+                            .history
+                            .len()
+                            .saturating_sub(state.history.appended),
+                    ));
+
+                let mut s = String::new();
+                file.read_to_string(&mut s)?;
+
+                if !s.ends_with('\n') {
+                    s.push('\n');
+                }
+
+                file.set_len(0)?;
+
+                file.seek(std::io::SeekFrom::Start(0))?;
+
+                s.extend(it);
                 file.write_all(s.as_bytes())?;
 
                 state.history.appended = state.history.history.len();
@@ -267,7 +291,7 @@ mod history {
                 let mut file = std::fs::OpenOptions::new().read(true).open(path.as_ref())?;
                 let mut s = String::new();
                 file.read_to_string(&mut s)?;
-                let lines = s.lines().filter(|s| !s.is_empty()).map(String::from);
+                let lines = s.lines().map(String::from);
                 state.history.history.extend(lines);
                 state.history.appended = state.history.history.len();
                 Ok(())
