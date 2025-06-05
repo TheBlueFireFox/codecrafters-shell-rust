@@ -129,6 +129,7 @@ fn split_args(args_raw: &str) -> Result<Vec<Cow<'_, str>>, Error> {
                 // + 1 to ignore '
                 // ..idx to ignore '
                 if !c2.is_whitespace() {
+                    current_block = Character::Other;
                     continue;
                 }
 
@@ -509,7 +510,7 @@ mod test {
     #[test]
     fn multiple_single_quote_mixed() {
         let txt = r#"echo 'example     script' 'shell''test' hello''world"#;
-        let exp: &[Cow<'_, str>] = &["echo","example     script", "shell", "test", "helloworld"].map(Into::into);
+        let exp: &[Cow<'_, str>] = &["echo","example     script", "shelltest", "helloworld"].map(Into::into);
         let v = process_args_inner(txt).expect("able to parse");
         assert_eq!(1, v.len());
         for (exp, got) in exp.iter().zip(&v[0]) {
