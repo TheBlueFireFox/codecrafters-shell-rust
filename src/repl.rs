@@ -177,9 +177,12 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
-    let history = match std::env::var_os("HISTFILE") {
-        None => history::History::new(),
-        Some(path) => history::History::from_file(path),
+    let history = match std::env::var("HISTFILE") {
+        Err(_) => history::History::new(),
+        Ok(path) => match &path[..] {
+            "/home/adrian/.zsh_history" | "/home/adrian/.bash_history" => history::History::new(),
+            path => history::History::from_file(path),
+        },
     }?;
 
     let mut state = State {
