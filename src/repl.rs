@@ -11,7 +11,7 @@ use memfile::MemFile;
 
 use crate::{
     args,
-    builtin::{Builtins, Errors, ExitCode},
+    builtin::{self, is_program, Builtins, Errors, ExitCode},
     redirect::{Redirect, RedirectIO},
     terminal::{read_line, ReadLineError, PROMT},
 };
@@ -32,154 +32,26 @@ impl From<LastStdout> for Stdio {
     }
 }
 
-struct State {
-    last_exit_code: ExitCode,
-    path: PathBuf,
-    history: Vec<String>,
+pub struct History {
+    pub history: Vec<String>,
+    pub appended: usize,
+}
+
+pub struct State {
+    pub last_exit_code: ExitCode,
+    pub path: PathBuf,
+    pub history: History,
 }
 
 impl State {
-    fn is_builtin(com: &str) -> Result<(), Errors> {
-        com.try_into().map(|_: Builtins| ())
-    }
-
     fn run_builtins(
         &mut self,
         com: Builtins,
         rest: &[Cow<'_, str>],
         stdout: &mut dyn std::io::Write,
-        _stderr: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
     ) -> Result<(), Errors> {
-        match com {
-            Builtins::Exit => self.run_exit(rest),
-            Builtins::Echo => self.run_echo(rest, stdout),
-            Builtins::Type => self.run_type(rest, stdout),
-            Builtins::History => self.run_history(rest, stdout),
-            Builtins::Pwd => self.run_pwd(stdout),
-            Builtins::Cd => self.run_cd(rest, stdout),
-        }
-    }
-
-    fn run_cd(
-        &mut self,
-        rest: &[Cow<'_, str>],
-        stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors> {
-        let new = &rest[0];
-        let new = match new.chars().next() {
-            Some('~') => {
-                // home case
-                let hm: PathBuf = std::env::var("HOME")
-                    .expect("error getting HOME env variable")
-                    .into();
-                hm.join(new.trim_start_matches('~'))
-            }
-            Some('/') => new.as_ref().into(),
-            Some(_) => self.path.join(new.as_ref()),
-            None => panic!("new path should not be empty"),
-        };
-
-        if new.is_dir() {
-            self.path = std::fs::canonicalize(new)?;
-            return Ok(());
-        }
-
-        let p = format!("{:?}", new);
-        let p = p.trim_matches('"');
-        writeln!(stdout, "cd: {}: No such file or directory", p)?;
-
-        Ok(())
-    }
-
-    fn run_pwd(&self, stdout: &mut dyn std::io::Write) -> Result<(), Errors> {
-        let p = format!("{:?}", self.path);
-        writeln!(stdout, "{}", p.trim_matches('"'))?;
-        Ok(())
-    }
-
-    fn run_history(
-        &self,
-        rest: &[Cow<'_, str>],
-        stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors> {
-        let len = match rest.first().map(|s| s.parse()) {
-            None => self.history.len(),
-            Some(Ok(k)) => k,
-            Some(Err(_)) => {
-                return Err(Errors::IncorrectArgumentType(
-                    rest[0].to_string(),
-                    "integer".into(),
-                ));
-            }
-        };
-
-        for (i, l) in self
-            .history
-            .iter()
-            .enumerate()
-            .skip(self.history.len() - len)
-        {
-            writeln!(stdout, "    {} {}", i + 1, l)?;
-        }
-        Ok(())
-    }
-
-    fn run_type(
-        &self,
-        rest: &[Cow<'_, str>],
-        stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors> {
-        let com = rest[0].clone();
-        if Self::is_builtin(com.as_ref()).is_ok() {
-            writeln!(stdout, "{} is a shell builtin", com)?;
-        } else if let Ok(v) = Self::is_program(&com) {
-            writeln!(stdout, "{} is {}", com, v)?;
-        } else {
-            writeln!(stdout, "{} not found", com)?;
-        }
-        Ok(())
-    }
-
-    fn run_echo(
-        &self,
-        rest: &[Cow<'_, str>],
-        stdout: &mut dyn std::io::Write,
-    ) -> Result<(), Errors> {
-        writeln!(stdout, "{}", rest.join(" "))?;
-        Ok(())
-    }
-
-    fn run_exit(&self, rest: &[Cow<'_, str>]) -> Result<(), Errors> {
-        if rest.is_empty() {
-            return Err(Errors::MissingArgument("exit".into()));
-        }
-
-        let code = rest[0].parse();
-        if let Ok(c) = code {
-            return Err(Errors::Shutdown(c));
-        }
-
-        Err(Errors::IncorrectArgumentType(
-            rest[0].to_string(),
-            "integer".into(),
-        ))
-    }
-
-    fn is_program(com: impl AsRef<str>) -> Result<String, Errors> {
-        let paths = std::env::var("PATH").expect("PATH should have been set correctly");
-        let mut pbuf = PathBuf::new();
-        for path in paths.split(':').map(str::trim) {
-            pbuf.clear();
-            pbuf.push(path);
-            pbuf.push(com.as_ref());
-            if pbuf.is_file() {
-                return Ok(pbuf
-                    .to_str()
-                    .expect("unable to create string because of invalid UTF8")
-                    .to_string());
-            }
-        }
-        Err(Errors::CommandNotFound(com.as_ref().to_string()))
+        builtin::run(self, com, rest, stdout, stderr)
     }
 
     fn run_program(
@@ -190,7 +62,7 @@ impl State {
         stdout: impl Into<Stdio>,
         stderr: impl Into<Stdio>,
     ) -> Result<Child, Errors> {
-        let _path = Self::is_program(com)?;
+        let _path = is_program(com)?;
 
         // ugly alloc
         let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
@@ -230,19 +102,18 @@ impl State {
                     _ => Err(Errors::ExitCode(code)),
                 }
             }
-            LastStdout::Builtin(redirect_io) => {
-                match redirect_io {
-                    RedirectIO::Other(mut m) => {
-                        let mut buf = String::new();
-                        m.read_to_string(&mut buf)?;
-                        print!("{}", buf);
-                    }
-                    RedirectIO::File(mut f) => {
-                        let mut buf = String::new();
-                        f.read_to_string(&mut buf)?;
-                        print!("{}", buf);
-                    }
-                }
+
+            LastStdout::Builtin(RedirectIO::Other(mut m)) => {
+                let mut buf = String::new();
+                m.read_to_string(&mut buf)?;
+                print!("{}", buf);
+                Ok(())
+            }
+            LastStdout::Builtin(RedirectIO::File(mut f)) => {
+                let mut buf = String::new();
+                f.read_to_string(&mut buf)?;
+                print!("{}", buf);
+
                 Ok(())
             }
         }
@@ -311,7 +182,10 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
     let mut input = String::with_capacity(1024);
 
-    let history = Vec::with_capacity(100);
+    let history = History {
+        history: Vec::with_capacity(100),
+        appended: 0,
+    };
 
     let mut state = State {
         last_exit_code: 0,
@@ -330,7 +204,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
         stdout.flush()?;
         stderr.flush()?;
 
-        match read_line(&mut input, &mut stdout, &state.history) {
+        match read_line(&mut input, &mut stdout, &state.history.history) {
             Ok(_) => {}
             Err(ReadLineError::Shutdown(0)) => {
                 break;
@@ -351,7 +225,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
             continue;
         }
 
-        state.history.push(input.to_string());
+        state.history.history.push(input.to_string());
 
         match state.run_commands(input) {
             Ok(_) => state.last_exit_code = 0,
