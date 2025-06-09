@@ -1,6 +1,6 @@
 pub type ExitCode = i32;
 
-use crate::args;
+use crate::{args, completion::Completion};
 use std::{borrow::Cow, path::PathBuf};
 
 use crate::repl::State;
@@ -23,7 +23,7 @@ pub enum Errors {
     ParseError(#[from] args::Error),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Builtins {
     Exit,
     Echo,
@@ -33,25 +33,16 @@ pub enum Builtins {
     History,
 }
 
-impl<'input> TryFrom<&'input str> for Builtins {
-    type Error = Errors;
-
-    fn try_from(value: &'input str) -> Result<Self, Self::Error> {
-        match value {
-            "exit" => Ok(Self::Exit),
-            "echo" => Ok(Self::Echo),
-            "type" => Ok(Self::Type),
-            "pwd" => Ok(Self::Pwd),
-            "cd" => Ok(Self::Cd),
-            "history" => Ok(Self::History),
-            _ => Err(Errors::CommandNotFound(value.into())),
-        }
-    }
-}
-
 impl Builtins {
-    pub fn supported() -> [&'static str; 6] {
-        ["exit", "echo", "type", "pwd", "cd", "history"]
+    pub fn supported() -> [(Builtins, &'static str); 6] {
+        [
+            (Builtins::Exit, "exit"),
+            (Builtins::Echo, "echo"),
+            (Builtins::Type, "type"),
+            (Builtins::Pwd, "pwd"),
+            (Builtins::Cd, "cd"),
+            (Builtins::History, "history"),
+        ]
     }
 }
 
@@ -74,6 +65,7 @@ pub fn is_program(com: impl AsRef<str>) -> Result<String, Errors> {
 
 pub fn run(
     state: &mut State,
+    completion: &Completion,
     com: Builtins,
     rest: &[Cow<'_, str>],
     stdout: &mut dyn std::io::Write,
@@ -82,7 +74,7 @@ pub fn run(
     match com {
         Builtins::Exit => exit::run(rest),
         Builtins::Echo => echo::run(rest, stdout),
-        Builtins::Type => btype::run(rest, stdout),
+        Builtins::Type => btype::run(rest, stdout, completion),
         Builtins::Pwd => pwd::run(state, stdout),
         Builtins::Cd => cd::run(state, rest, stdout),
         Builtins::History => history::run(state, rest, stdout),
@@ -131,17 +123,25 @@ mod cd {
 mod btype {
     use std::borrow::Cow;
 
-    use super::{is_program, Builtins, Errors};
+    use crate::completion::{Completion, Type};
 
-    pub fn run(rest: &[Cow<'_, str>], stdout: &mut dyn std::io::Write) -> Result<(), Errors> {
-        let com = rest[0].clone();
-        if Builtins::try_from(com.as_ref()).is_ok() {
-            writeln!(stdout, "{} is a shell builtin", com)?;
-        } else if let Ok(v) = is_program(&com) {
-            writeln!(stdout, "{} is {}", com, v)?;
-        } else {
-            writeln!(stdout, "{} not found", com)?;
+    use super::Errors;
+
+    pub fn run(
+        rest: &[Cow<'_, str>],
+        stdout: &mut dyn std::io::Write,
+        completion: &Completion,
+    ) -> Result<(), Errors> {
+        let Some(com) = rest.first() else {
+            return Err(Errors::MissingArgument("type".into()));
+        };
+
+        match completion.matches_exact(com) {
+            None => writeln!(stdout, "{} not found", com)?,
+            Some(Type::Program(p)) => writeln!(stdout, "{} is {}", com, p.display())?,
+            Some(Type::Builtin(_)) => writeln!(stdout, "{} is a shell builtin", com)?,
         }
+
         Ok(())
     }
 }

@@ -12,6 +12,7 @@ use memfile::MemFile;
 use crate::{
     args,
     builtin::{self, history, is_program, Builtins, Errors, ExitCode},
+    completion::{Completion, Type},
     redirect::{Redirect, RedirectIO},
     terminal::{read_line, ReadLineError, PROMT},
 };
@@ -39,39 +40,7 @@ pub struct State {
 }
 
 impl State {
-    fn run_builtins(
-        &mut self,
-        com: Builtins,
-        rest: &[Cow<'_, str>],
-        stdout: &mut dyn std::io::Write,
-        stderr: &mut dyn std::io::Write,
-    ) -> Result<(), Errors> {
-        builtin::run(self, com, rest, stdout, stderr)
-    }
-
-    fn run_program(
-        &self,
-        com: &str,
-        rest: &[Cow<'_, str>],
-        stdin: impl Into<Stdio>,
-        stdout: impl Into<Stdio>,
-        stderr: impl Into<Stdio>,
-    ) -> Result<Child, Errors> {
-        let _path = is_program(com)?;
-
-        // ugly alloc
-        let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
-        let child = Command::new(com)
-            .args(args)
-            .stdin(stdin)
-            .stdout(stdout)
-            .stderr(stderr)
-            .spawn()?;
-
-        Ok(child)
-    }
-
-    fn run_commands(&mut self, command: &str) -> Result<(), Errors> {
+    fn run_commands(&mut self, command: &str, completion: &Completion) -> Result<(), Errors> {
         let args = args::process_args(command)?;
 
         let mut last_stdout = LastStdout::None;
@@ -80,12 +49,19 @@ impl State {
         for (i, block) in args.into_iter().enumerate() {
             let is_last = i + 1 == blocks;
 
-            last_stdout = match block.command.as_ref().try_into() {
-                Ok(com) => self.run_commands_builtin(com, block, last_stdout),
-                Err(_) => self.run_commands_program(block, last_stdout, is_last),
+            last_stdout = match completion.matches_exact(&block.command) {
+                None => Err(Errors::CommandNotFound(block.command.into())),
+                Some(Type::Builtin(com)) => {
+                    self.run_commands_builtin(completion, *com, block, last_stdout)
+                }
+                Some(Type::Program(_)) => self.run_commands_program(block, last_stdout, is_last),
             }?;
         }
 
+        self.run_commands_post(last_stdout)
+    }
+
+    fn run_commands_post(&self, last_stdout: LastStdout) -> Result<(), Errors> {
         match last_stdout {
             LastStdout::None => Ok(()),
             LastStdout::Child(mut child) => {
@@ -114,8 +90,42 @@ impl State {
         }
     }
 
+    fn run_builtins(
+        &mut self,
+        completion: &Completion,
+        com: Builtins,
+        rest: &[Cow<'_, str>],
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> Result<(), Errors> {
+        builtin::run(self, completion, com, rest, stdout, stderr)
+    }
+
+    fn run_program(
+        &self,
+        com: &str,
+        rest: &[Cow<'_, str>],
+        stdin: impl Into<Stdio>,
+        stdout: impl Into<Stdio>,
+        stderr: impl Into<Stdio>,
+    ) -> Result<Child, Errors> {
+        let _path = is_program(com)?;
+
+        // ugly alloc
+        let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
+        let child = Command::new(com)
+            .args(args)
+            .stdin(stdin)
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()?;
+
+        Ok(child)
+    }
+
     fn run_commands_builtin(
         &mut self,
+        completion: &Completion,
         com: Builtins,
         block: args::Command<'_>,
         last_stdout: LastStdout,
@@ -131,7 +141,13 @@ impl State {
 
         let mut redirect = Redirect::new_builtin(block.redirect)?;
 
-        self.run_builtins(com, &block.args, &mut redirect.stdout, &mut redirect.stderr)?;
+        self.run_builtins(
+            completion,
+            com,
+            &block.args,
+            &mut redirect.stdout,
+            &mut redirect.stderr,
+        )?;
 
         let mut s = redirect.stdout;
 
@@ -202,7 +218,9 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
         stdout.flush()?;
         stderr.flush()?;
 
-        match read_line(&mut input, &mut stdout, &state.history.history) {
+        let completion = Completion::new()?;
+
+        match read_line(&mut input, &mut stdout, &state.history.history, &completion) {
             Ok(_) => {}
             Err(ReadLineError::Shutdown(0)) => {
                 break;
@@ -225,7 +243,7 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
         state.history.history.push(input.to_string());
 
-        match state.run_commands(input) {
+        match state.run_commands(input, &completion) {
             Ok(_) => state.last_exit_code = 0,
             Err(Errors::CommandNotFound(_)) => {
                 writeln!(&stdout, "{}: command not found", input)?;
@@ -250,6 +268,9 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
                 writeln!(&stdout, "{}", e)?;
             }
         }
+
+        stdout.flush()?;
+        stderr.flush()?;
     }
 
     Ok(shutdown_code)

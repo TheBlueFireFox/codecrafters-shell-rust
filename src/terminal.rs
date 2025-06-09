@@ -20,17 +20,18 @@ pub enum ReadLineError {
     Shutdown(i32),
     #[error("Io Error <{0}>")]
     Io(#[from] std::io::Error),
-    #[error("While handling the tab completion <{0}>")]
-    TabHandling(#[from] completion::TabHandlingError),
+    #[error("While handling the completion <{0}>")]
+    TabHandling(#[from] completion::CompletionError),
 }
 
 pub fn read_line(
     line: &mut String,
     stdout: &mut Stdout,
     history: &[String],
+    completion: &Completion,
 ) -> Result<(), ReadLineError> {
     enable_raw_mode()?;
-    let res = read_line_loop(line, stdout, history);
+    let res = read_line_loop(line, stdout, history, completion);
     disable_raw_mode()?;
     res
 }
@@ -147,9 +148,9 @@ fn read_line_loop(
     line: &mut String,
     stdout: &mut Stdout,
     history: &[String],
+    completion: &Completion,
 ) -> Result<(), ReadLineError> {
     // load short hand
-    let completion = completion::generate_completion()?;
     let mut tab_state = TabCompletionState::None;
     let mut history_idx = history.len();
     loop {
@@ -169,7 +170,7 @@ fn read_line_loop(
             Event::Key(KeyEvent {
                 code: KeyCode::Tab, ..
             }) => {
-                tab_state = handle_tab(stdout, line, &completion, tab_state)?;
+                tab_state = handle_tab(stdout, line, completion, tab_state)?;
             }
             Event::Key(KeyEvent { code, .. }) => {
                 if !read_line_handle_key_event(line, stdout, history, &mut history_idx, code)? {
@@ -197,7 +198,7 @@ fn handle_tab(
     completion: &Completion,
     state: TabCompletionState,
 ) -> std::io::Result<TabCompletionState> {
-    let matches: Vec<String> = completion.predictive_search(line.as_bytes()).collect();
+    let matches: Vec<_> = completion.matches(&line).collect();
 
     match matches.len() {
         0 => {
@@ -207,7 +208,7 @@ fn handle_tab(
         1 => {
             // we found a match
             line.clear();
-            line.push_str(&matches[0]);
+            line.push_str(&matches[0].0);
             line.push(' ');
 
             stdout
@@ -220,7 +221,7 @@ fn handle_tab(
         _ => {}
     }
 
-    let prefix: Option<String> = completion.longest_prefix(line.as_bytes());
+    let prefix: Option<String> = completion.longest_prefix(&line);
 
     if let Some(s) = prefix {
         if s[..] != line[..] {
@@ -229,8 +230,7 @@ fn handle_tab(
 
             stdout
                 .queue(cursor::MoveToColumn(PROMT.len() as _))?
-                .queue(style::Print(&line))?
-                .flush()?;
+                .queue(style::Print(&line))?;
 
             stdout.flush()?;
 
@@ -248,7 +248,7 @@ fn handle_tab(
 
     for option in matches {
         stdout
-            .queue(style::Print(&option))?
+            .queue(style::Print(&option.0))?
             .queue(style::Print("  "))?;
     }
 
