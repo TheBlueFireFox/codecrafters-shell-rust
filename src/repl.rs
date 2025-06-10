@@ -173,19 +173,15 @@ impl State {
     ) -> Result<LastStdout, Errors> {
         let redirect = Redirect::new_program(block.redirect, is_last)?;
 
-        match self.run_program(
+        let child = self.run_program(
             &block.command,
             &block.args,
             last_stdout,
             redirect.stdout,
             redirect.stderr,
-        ) {
-            Ok(child) => Ok(LastStdout::Child(child)),
-            Err(Errors::CommandNotFound(_)) => {
-                Err(Errors::CommandNotFound(block.command.to_string()))
-            }
-            Err(err) => Err(err),
-        }
+        )?;
+
+        Ok(LastStdout::Child(child))
     }
 }
 
