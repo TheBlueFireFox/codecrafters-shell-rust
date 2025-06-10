@@ -123,7 +123,7 @@ mod cd {
 mod btype {
     use std::borrow::Cow;
 
-    use crate::completion::{Completion, Type};
+    use crate::completion::{Completion, Entry, Type};
 
     use super::Errors;
 
@@ -138,8 +138,20 @@ mod btype {
 
         match completion.matches_exact(com) {
             None => writeln!(stdout, "{} not found", com)?,
-            Some(Type::Program(p)) => writeln!(stdout, "{} is {}", com, p.display())?,
-            Some(Type::Builtin(_)) => writeln!(stdout, "{} is a shell builtin", com)?,
+            Some(e) => inner_run(com, e, stdout)?,
+        }
+
+        Ok(())
+    }
+
+    fn inner_run(
+        com: impl AsRef<str>,
+        e: &Entry,
+        stdout: &mut dyn std::io::Write,
+    ) -> Result<(), Errors> {
+        match &e.value {
+            Type::Builtin(_) => writeln!(stdout, "{} is a shell builtin", com.as_ref())?,
+            Type::Program(p) => writeln!(stdout, "{} is {}", com.as_ref(), p.display())?,
         }
 
         Ok(())

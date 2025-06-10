@@ -1,6 +1,6 @@
 use std::{ffi::OsStr, path::PathBuf};
 
-use trie_rs::map::TrieBuilder;
+use ptrie::Trie;
 
 use crate::builtin::Builtins;
 
@@ -15,6 +15,12 @@ pub enum CompletionError {
 }
 
 #[derive(Debug, Clone)]
+pub struct Entry {
+    pub key: String,
+    pub value: Type,
+}
+
+#[derive(Debug, Clone)]
 pub enum Type {
     Builtin(Builtins),
     Program(PathBuf),
@@ -22,44 +28,48 @@ pub enum Type {
 
 #[derive(Debug, Clone)]
 pub struct Completion {
-    map: trie_rs::map::Trie<u8, Type>,
+    map: Trie<u8, Entry>,
 }
 
 impl Completion {
     pub fn new() -> Result<Self, CompletionError> {
-        let mut builder = trie_rs::map::TrieBuilder::new();
+        let mut trie = Trie::new();
 
-        Self::generate_builtins(&mut builder)?;
+        Self::generate_builtins(&mut trie)?;
 
         // program names
-        Self::generate_program_names(&mut builder)?;
-        let s = Self {
-            map: builder.build(),
-        };
+        Self::generate_program_names(&mut trie)?;
+        let s = Self { map: trie };
 
         Ok(s)
     }
 
-    pub fn matches_exact(&self, query: impl AsRef<str>) -> Option<&Type> {
-        self.map.exact_match(query.as_ref().as_bytes())
+    pub fn matches_exact(&self, query: impl AsRef<str>) -> Option<&Entry> {
+        self.map.get(query.as_ref().bytes())
     }
 
-    pub fn matches(&self, query: impl AsRef<str>) -> impl Iterator<Item = (String, &Type)> {
-        self.map.predictive_search(query.as_ref().as_bytes())
+    pub fn matches(&self, query: impl AsRef<str>) -> Vec<&Entry> {
+        self.map.find_postfixes(query.as_ref().bytes())
     }
 
-    pub fn longest_prefix(&self, query: impl AsRef<str>) -> Option<String> {
-        self.map.longest_prefix(query.as_ref())
+    pub fn longest_prefix(&self, query: impl AsRef<str>) -> Option<&Entry> {
+        self.map.find_longest_prefix(query.as_ref().bytes())
     }
 
-    fn generate_builtins(builder: &mut TrieBuilder<u8, Type>) -> Result<(), CompletionError> {
+    fn generate_builtins(builder: &mut Trie<u8, Entry>) -> Result<(), CompletionError> {
         for (b, n) in Builtins::supported() {
-            builder.push(n, Type::Builtin(b));
+            builder.insert(
+                n.bytes(),
+                Entry {
+                    key: n.into(),
+                    value: Type::Builtin(b),
+                },
+            );
         }
         Ok(())
     }
 
-    fn generate_program_names(builder: &mut TrieBuilder<u8, Type>) -> Result<(), CompletionError> {
+    fn generate_program_names(builder: &mut Trie<u8, Entry>) -> Result<(), CompletionError> {
         let paths = std::env::var("PATH").map_err(|_| CompletionError::MissingPathEnv)?;
 
         let process_file = |file: &PathBuf| {
@@ -76,7 +86,13 @@ impl Completion {
                 .filter(|e| e.is_file())
             {
                 let name = process_file(&file)?;
-                builder.push(name, Type::Program(file));
+                builder.insert(
+                    name.bytes(),
+                    Entry {
+                        key: name.clone(),
+                        value: Type::Program(file),
+                    },
+                );
             }
         }
 

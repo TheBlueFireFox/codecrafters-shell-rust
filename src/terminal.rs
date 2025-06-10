@@ -198,7 +198,7 @@ fn handle_tab(
     completion: &Completion,
     state: TabCompletionState,
 ) -> std::io::Result<TabCompletionState> {
-    let matches: Vec<_> = completion.matches(&line).collect();
+    let matches: Vec<_> = completion.matches(&line);
 
     match matches.len() {
         0 => {
@@ -208,7 +208,7 @@ fn handle_tab(
         1 => {
             // we found a match
             line.clear();
-            line.push_str(&matches[0].0);
+            line.push_str(&matches[0].key);
             line.push(' ');
 
             stdout
@@ -221,12 +221,12 @@ fn handle_tab(
         _ => {}
     }
 
-    let prefix: Option<String> = completion.longest_prefix(&line);
+    let prefix = completion.longest_prefix(&line);
 
     if let Some(s) = prefix {
-        if s[..] != line[..] {
+        if s.key[..] != line[..] {
             line.clear();
-            line.push_str(&s);
+            line.push_str(&s.key);
 
             stdout
                 .queue(cursor::MoveToColumn(PROMT.len() as _))?
@@ -248,7 +248,7 @@ fn handle_tab(
 
     for option in matches {
         stdout
-            .queue(style::Print(&option.0))?
+            .queue(style::Print(&option.key))?
             .queue(style::Print("  "))?;
     }
 

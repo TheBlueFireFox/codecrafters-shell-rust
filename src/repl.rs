@@ -12,7 +12,7 @@ use memfile::MemFile;
 use crate::{
     args,
     builtin::{self, history, is_program, Builtins, Errors, ExitCode},
-    completion::{Completion, Type},
+    completion::{Completion, Entry, Type},
     redirect::{Redirect, RedirectIO},
     terminal::{read_line, ReadLineError, PROMT},
 };
@@ -51,10 +51,14 @@ impl State {
 
             last_stdout = match completion.matches_exact(&block.command) {
                 None => Err(Errors::CommandNotFound(block.command.into())),
-                Some(Type::Builtin(com)) => {
-                    self.run_commands_builtin(completion, *com, block, last_stdout)
-                }
-                Some(Type::Program(_)) => self.run_commands_program(block, last_stdout, is_last),
+                Some(&Entry {
+                    value: Type::Builtin(com),
+                    ..
+                }) => self.run_commands_builtin(completion, com, block, last_stdout),
+                Some(&Entry {
+                    value: Type::Program(_),
+                    ..
+                }) => self.run_commands_program(block, last_stdout, is_last),
             }?;
         }
 
