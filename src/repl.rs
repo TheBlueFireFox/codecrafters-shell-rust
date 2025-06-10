@@ -243,8 +243,8 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
 
         match state.run_commands(input, &completion) {
             Ok(_) => state.last_exit_code = 0,
-            Err(Errors::CommandNotFound(_)) => {
-                writeln!(&stdout, "{}: command not found", input)?;
+            Err(Errors::CommandNotFound(com)) => {
+                writeln!(&stderr, "{}: command not found", com)?;
             }
             Err(Errors::ExitCode(v)) => {
                 state.last_exit_code = v;
@@ -254,21 +254,18 @@ pub fn repl() -> anyhow::Result<Option<ExitCode>> {
                 break;
             }
             Err(e @ Errors::MissingArgument(_)) => {
-                writeln!(&stdout, "{}", e)?;
+                writeln!(&stderr, "{}", e)?;
             }
             Err(e @ Errors::IncorrectArgumentType(_, _)) => {
-                writeln!(&stdout, "{}", e)?;
+                writeln!(&stderr, "{}", e)?;
             }
             Err(e @ Errors::IoError(_)) => {
-                writeln!(&stdout, "{}", e)?;
+                writeln!(&stderr, "{}", e)?;
             }
             Err(e @ Errors::ParseError(_)) => {
-                writeln!(&stdout, "{}", e)?;
+                writeln!(&stderr, "{}", e)?;
             }
         }
-
-        stdout.flush()?;
-        stderr.flush()?;
     }
 
     Ok(shutdown_code)

@@ -35,10 +35,12 @@ impl Completion {
     pub fn new() -> Result<Self, CompletionError> {
         let mut trie = Trie::new();
 
-        Self::generate_builtins(&mut trie)?;
-
         // program names
         Self::generate_program_names(&mut trie)?;
+
+        // builtins (ensure they override any others)
+        Self::generate_builtins(&mut trie)?;
+
         let s = Self { map: trie };
 
         Ok(s)
