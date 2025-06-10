@@ -11,7 +11,7 @@ use memfile::MemFile;
 
 use crate::{
     args,
-    builtin::{self, history, is_program, Builtins, Errors, ExitCode},
+    builtin::{self, history, Builtins, Errors, ExitCode},
     completion::{Completion, Entry, Type},
     redirect::{Redirect, RedirectIO},
     terminal::{read_line, ReadLineError, PROMT},
@@ -113,8 +113,6 @@ impl State {
         stdout: impl Into<Stdio>,
         stderr: impl Into<Stdio>,
     ) -> Result<Child, Errors> {
-        let _path = is_program(com)?;
-
         // ugly alloc
         let args: Vec<_> = rest.iter().map(AsRef::as_ref).collect();
         let child = Command::new(com)

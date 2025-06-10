@@ -1,7 +1,7 @@
 pub type ExitCode = i32;
 
 use crate::{args, completion::Completion};
-use std::{borrow::Cow, path::PathBuf};
+use std::borrow::Cow;
 
 use crate::repl::State;
 
@@ -44,23 +44,6 @@ impl Builtins {
             (Builtins::History, "history"),
         ]
     }
-}
-
-pub fn is_program(com: impl AsRef<str>) -> Result<String, Errors> {
-    let paths = std::env::var("PATH").expect("PATH should have been set correctly");
-    let mut pbuf = PathBuf::new();
-    for path in paths.split(':').map(str::trim) {
-        pbuf.clear();
-        pbuf.push(path);
-        pbuf.push(com.as_ref());
-        if pbuf.is_file() {
-            return Ok(pbuf
-                .to_str()
-                .expect("unable to create string because of invalid UTF8")
-                .to_string());
-        }
-    }
-    Err(Errors::CommandNotFound(com.as_ref().to_string()))
 }
 
 pub fn run(
